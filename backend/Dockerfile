@@ -30,8 +30,4 @@ RUN mkdir -p .nanobot
 
 EXPOSE 8080
 
-# Health check endpoint
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
-
 CMD ["./nanobot", "run", "--ui", "--listen", "0.0.0.0:8080"]
