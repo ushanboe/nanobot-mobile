@@ -11,10 +11,6 @@ RUN git clone https://github.com/nanobot-ai/nanobot.git .
 # Build Go binary
 RUN go build -o nanobot .
 
-# Build UI
-WORKDIR /app/packages/ui
-RUN npm install -g pnpm && pnpm install && pnpm build
-
 # Production image
 FROM alpine:latest
 
@@ -23,11 +19,10 @@ RUN apk add --no-cache ca-certificates
 WORKDIR /app
 
 COPY --from=builder /app/nanobot .
-COPY --from=builder /app/packages/ui/build ./packages/ui/build
 
 # Copy config file
 COPY nanobot.yaml .
 
 EXPOSE 8080
 
-CMD ["./nanobot", "run", "--config", "./nanobot.yaml", "--listen-address", "0.0.0.0:8080"]
+CMD ["./nanobot", "run", "--config", "./nanobot.yaml", "--listen-address", "0.0.0.0:8080", "--disable-ui"]
