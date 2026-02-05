@@ -25,9 +25,9 @@ WORKDIR /app
 COPY --from=builder /app/nanobot .
 COPY --from=builder /app/packages/ui/build ./packages/ui/build
 
-# Create config directory
-RUN mkdir -p .nanobot
+# Copy config file
+COPY nanobot.yaml .
 
 EXPOSE 8080
 
-CMD ["./nanobot", "run", "--ui", "--listen", "0.0.0.0:8080"]
+CMD ["./nanobot", "run", "nanobot.yaml"]
