@@ -30,4 +30,4 @@ COPY nanobot.yaml .
 
 EXPOSE 8080
 
-CMD ["./nanobot", "run", "nanobot.yaml"]
+CMD ["./nanobot", "run", "--config", "nanobot.yaml", "--listen", "0.0.0.0:8080"]

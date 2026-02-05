@@ -1,5 +1,4 @@
 name: Nanobot Mobile
-listen: 0.0.0.0:8080
 
 agents:
   assistant:
