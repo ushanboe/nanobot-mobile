@@ -84,4 +84,4 @@ cat /app/nanobot.yaml
 echo "---"
 
 # Start nanobot
-exec ./nanobot run --config ./nanobot.yaml --listen-address 0.0.0.0:8080 --disable-ui
+exec ./nanobot run --listen-address 0.0.0.0:8080 --disable-ui
