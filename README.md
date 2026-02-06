@@ -8,15 +8,18 @@ A React Native mobile app for [Nanobot](https://github.com/nanobot-ai/nanobot) -
 nanobot-mobile/
 ├── backend/          # Nanobot server (deploys to Railway)
 │   ├── Dockerfile
-│   ├── railway.json
-│   └── .env.example
+│   ├── nanobot.yaml
+│   └── railway.toml
 │
 └── mobile/           # React Native app (Expo)
+    ├── android/      # Native Android project (prebuild)
     ├── app/          # Screens (Expo Router)
     ├── components/   # UI components
+    ├── constants/    # Theme colors, spacing, fonts
     ├── services/     # MCP client
     ├── store/        # Zustand state management
-    └── types/        # TypeScript types
+    ├── types/        # TypeScript types
+    └── utils/        # Settings helpers
 ```
 
 ## Quick Start
@@ -26,7 +29,7 @@ nanobot-mobile/
 1. **Create a new Railway project:**
    - Go to [railway.app](https://railway.app)
    - Click "New Project" → "Deploy from GitHub repo"
-   - Select/connect your forked nanobot repository
+   - Select/connect your repository
 
 2. **Or deploy from this repo:**
    ```bash
@@ -38,13 +41,13 @@ nanobot-mobile/
 
 3. **Set environment variables in Railway:**
    ```
-   ANTHROPIC_API_KEY=your-key-here
-   # OR
    OPENAI_API_KEY=your-key-here
+   # OR
+   ANTHROPIC_API_KEY=your-key-here
    ```
 
 4. **Get your Railway URL:**
-   - It will be something like: `https://nanobot-production-xxxx.up.railway.app`
+   - It will be something like: `https://nanobot-mobile-production.up.railway.app`
 
 ### 2. Run Mobile App
 
@@ -52,53 +55,42 @@ nanobot-mobile/
 cd mobile
 
 # Install dependencies
-npm install
+npm install --legacy-peer-deps
 
 # Start Expo development server
-npm start
-
-# Or run directly on device/simulator
-npm run ios     # iOS Simulator
-npm run android # Android Emulator
+npx expo start --web        # Web browser
+npx expo start              # Expo Go on phone (scan QR)
+npx expo run:android        # Run on Android device/emulator
 ```
 
-### 3. Connect to Backend
+### 3. Build Android APK
 
-1. Open the app on your device/simulator
-2. Go to Settings
+```bash
+cd mobile
+
+# Build release APK locally (requires Android SDK)
+cd android && ./gradlew assembleRelease
+
+# APK output: android/app/build/outputs/apk/release/app-release.apk
+```
+
+### 4. Connect to Backend
+
+1. Install the APK on your Android device
+2. Open the app and go to Settings
 3. Enter your Railway backend URL
-4. Tap "Connect"
+4. Go back to Chat — it auto-connects
 
 ## Features
 
-- Chat with Claude/GPT via your own API keys
-- Multiple conversation threads
-- Support for custom agents
-- Image attachments from camera/gallery
-- Dark/light mode support
-- Secure credential storage
-
-## Building for Production
-
-### iOS
-
-```bash
-# Install EAS CLI
-npm install -g eas-cli
-
-# Configure your Apple credentials
-eas build:configure
-
-# Build for iOS
-eas build --platform ios
-```
-
-### Android
-
-```bash
-# Build for Android
-eas build --platform android
-```
+- Chat with GPT-4o / Claude via your own API keys
+- MCP protocol (JSON-RPC 2.0) communication
+- Dark theme UI with indigo accents
+- Auto-connect on app launch
+- Keyboard-aware chat input (adjustPan on Android)
+- Image attachments from camera/gallery (ChatInput component)
+- Secure credential storage (expo-secure-store)
+- Settings persist via AsyncStorage
 
 ## Project Structure
 
@@ -106,25 +98,24 @@ eas build --platform android
 
 | File | Purpose |
 |------|---------|
-| `app/_layout.tsx` | Root navigation layout |
-| `app/index.tsx` | Main chat screen |
-| `app/settings.tsx` | Settings & connection config |
-| `components/Message.tsx` | Chat message bubble |
-| `components/ChatInput.tsx` | Message input with attachments |
-| `components/ThreadList.tsx` | Conversation list |
+| `app/_layout.tsx` | Root layout (renders Slot) |
+| `app/(tabs)/_layout.tsx` | Tab navigator (Chat + Settings) |
+| `app/(tabs)/index.tsx` | Chat screen |
+| `app/(tabs)/settings.tsx` | Settings screen |
+| `components/ChatInput.tsx` | Rich input with image attachments |
+| `constants/theme.ts` | Colors, spacing, font sizes |
 | `services/mcpClient.ts` | MCP protocol client |
 | `store/chatStore.ts` | Zustand state management |
 | `types/mcp.ts` | TypeScript type definitions |
+| `utils/settings.ts` | AsyncStorage settings helper |
 
 ### Backend
 
-The backend uses the official Nanobot Docker image with minimal configuration.
-
 | File | Purpose |
 |------|---------|
-| `Dockerfile` | Multi-stage build for Go + UI |
-| `railway.json` | Railway deployment config |
-| `.env.example` | Environment variables template |
+| `Dockerfile` | Multi-stage Go build for Railway |
+| `nanobot.yaml` | Agent configuration (model: gpt-4o) |
+| `railway.toml` | Railway deployment config |
 
 ## Environment Variables
 
@@ -132,36 +123,29 @@ The backend uses the official Nanobot Docker image with minimal configuration.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ANTHROPIC_API_KEY` | Yes* | Anthropic API key |
 | `OPENAI_API_KEY` | Yes* | OpenAI API key |
-| `NANOBOT_DEFAULT_MODEL` | No | Default model (e.g., `claude-sonnet-4-20250514`) |
-| `PORT` | No | Server port (Railway sets this) |
+| `ANTHROPIC_API_KEY` | Yes* | Anthropic API key |
 
 *At least one API key is required.
 
-## Customization
+## Theming
 
-### Adding Custom Agents
-
-Create a `.nanobot/agents/` directory on the server with YAML or Markdown agent definitions:
-
-```yaml
-# .nanobot/agents/assistant.yaml
-name: Assistant
-model: claude-sonnet-4-20250514
-system: |
-  You are a helpful assistant.
-```
-
-### Theming
-
-Edit `mobile/constants/theme.ts` to customize colors.
+Edit `mobile/constants/theme.ts` to customize colors. Supports both light and dark palettes.
 
 ## Tech Stack
 
-- **Frontend:** React Native, Expo, Expo Router, Zustand
-- **Backend:** Go, MCP Protocol
-- **Deployment:** Railway (backend), EAS Build (mobile)
+- **Frontend:** React Native 0.81, Expo SDK 54, Expo Router, Zustand
+- **Backend:** Go (Nanobot), MCP Protocol
+- **Build:** Local Gradle (Android APK), EAS Build (cloud)
+- **Deployment:** Railway (backend)
+
+## Key Technical Notes
+
+- `react` and `react-dom` must both be exactly `19.1.0`
+- Always use `npm install --legacy-peer-deps`
+- Android uses `windowSoftInputMode="adjustPan"` for keyboard handling
+- Tab bar hides on keyboard open (`tabBarHideOnKeyboard: true`)
+- See `DEVELOPMENT.md` for full technical documentation
 
 ## License
 

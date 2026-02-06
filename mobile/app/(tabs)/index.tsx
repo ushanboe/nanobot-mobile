@@ -1,21 +1,40 @@
 // Main chat screen with proper nanobot integration
-import React, { useState, useRef } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator } from 'react-native';
-import { useRouter } from 'expo-router';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
+import { useRouter, useFocusEffect } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import { loadSettings, type Settings } from '../../utils/settings';
 
 export default function ChatScreen() {
   const router = useRouter();
-  const [serverUrl, setServerUrl] = useState('');
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [settingsLoading, setSettingsLoading] = useState(true);
   const [isConnected, setIsConnected] = useState(false);
   const [sessionId, setSessionId] = useState('');
   const [message, setMessage] = useState('');
   const [messages, setMessages] = useState<Array<{role: string, text: string}>>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [availableTools, setAvailableTools] = useState<string[]>([]);
   const scrollViewRef = useRef<ScrollView>(null);
+  const hasConnectedRef = useRef(false);
 
-  const handleConnect = async () => {
+  // Load settings on focus (to pick up changes from Settings tab)
+  useFocusEffect(
+    useCallback(() => {
+      loadSettings().then((loaded) => {
+        setSettings(loaded);
+        setSettingsLoading(false);
+        // Auto-connect if settings changed and we're not connected
+        if (loaded.serverUrl && !hasConnectedRef.current) {
+          hasConnectedRef.current = true;
+          handleConnectWithUrl(loaded.serverUrl);
+        }
+      });
+    }, [])
+  );
+
+  const handleConnectWithUrl = async (serverUrl: string) => {
     if (!serverUrl) {
-      alert('Please enter a server URL');
       return;
     }
 
@@ -57,14 +76,30 @@ export default function ChatScreen() {
         })
       });
       const toolsData = await toolsResponse.json();
-      const toolNames = toolsData.result?.tools?.map((t: any) => t.name).join(', ') || 'none';
+      const tools = toolsData.result?.tools?.map((t: any) => t.name) || [];
+      setAvailableTools(tools);
+      const toolNames = tools.join(', ') || 'none';
 
       setIsConnected(true);
-      setMessages([{ role: 'assistant', text: `Connected! Available tools: ${toolNames}` }]);
+      setMessages([{ role: 'assistant', text: `Connected to ${serverUrl}\n\nAvailable tools: ${toolNames}` }]);
     } catch (error) {
-      alert(`Connection failed: ${error}`);
+      setMessages([{ role: 'assistant', text: `Connection failed: ${error}\n\nPlease check your server URL in Settings.` }]);
     }
     setIsLoading(false);
+  };
+
+  const handleDisconnect = () => {
+    setIsConnected(false);
+    setMessages([]);
+    setSessionId('');
+    setAvailableTools([]);
+    hasConnectedRef.current = false;
+  };
+
+  const handleConnect = () => {
+    if (settings?.serverUrl) {
+      handleConnectWithUrl(settings.serverUrl);
+    }
   };
 
   const handleSend = async () => {
@@ -79,7 +114,7 @@ export default function ChatScreen() {
 
     try {
       // Call the 'chat-with-assistant' tool
-      const response = await fetch(`${serverUrl}/mcp/ui`, {
+      const response = await fetch(`${settings?.serverUrl}/mcp/ui`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -127,39 +162,85 @@ export default function ChatScreen() {
     setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: true }), 100);
   };
 
-  if (!isConnected) {
+  // Show loading state while settings are loading
+  if (settingsLoading) {
     return (
       <View style={styles.container}>
-        <Text style={styles.title}>Nanobot Mobile</Text>
-        <Text style={styles.subtitle}>Connect to your server</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="https://nanobot-mobile-production.up.railway.app"
-          placeholderTextColor="#666"
-          value={serverUrl}
-          onChangeText={setServerUrl}
-          autoCapitalize="none"
-        />
-        <TouchableOpacity
-          style={[styles.button, isLoading && styles.buttonDisabled]}
-          onPress={handleConnect}
-          disabled={isLoading}
-        >
-          {isLoading ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <Text style={styles.buttonText}>Connect</Text>
-          )}
-        </TouchableOpacity>
+        <View style={styles.centerContent}>
+          <ActivityIndicator color="#6366f1" size="large" />
+          <Text style={styles.loadingText}>Loading...</Text>
+        </View>
+      </View>
+    );
+  }
+
+  // Show setup prompt if no server URL configured
+  if (!settings?.serverUrl) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.centerContent}>
+          <Ionicons name="settings-outline" size={60} color="#6366f1" style={styles.setupIcon} />
+          <Text style={styles.title}>Welcome to Nanobot</Text>
+          <Text style={styles.subtitle}>Configure your server to get started</Text>
+          <TouchableOpacity
+            style={styles.button}
+            onPress={() => router.push('/settings')}
+          >
+            <Ionicons name="arrow-forward" size={20} color="#fff" />
+            <Text style={styles.buttonText}>Go to Settings</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
+  // Show connecting state
+  if (!isConnected && isLoading) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.centerContent}>
+          <ActivityIndicator color="#6366f1" size="large" />
+          <Text style={styles.loadingText}>Connecting to server...</Text>
+        </View>
+      </View>
+    );
+  }
+
+  // Show retry prompt if connection failed
+  if (!isConnected && !isLoading && messages.length > 0) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.centerContent}>
+          <Ionicons name="alert-circle-outline" size={60} color="#f87171" style={styles.setupIcon} />
+          <Text style={styles.title}>Connection Failed</Text>
+          <Text style={styles.errorMessage}>{messages[0]?.text}</Text>
+          <TouchableOpacity style={styles.button} onPress={handleConnect}>
+            <Ionicons name="refresh" size={20} color="#fff" />
+            <Text style={styles.buttonText}>Retry Connection</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.button, styles.secondaryButton]}
+            onPress={() => router.push('/settings')}
+          >
+            <Text style={styles.secondaryButtonText}>Check Settings</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     );
   }
 
   return (
-    <View style={styles.container}>
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
+    >
       <View style={styles.header}>
-        <Text style={styles.headerText}>Connected</Text>
-        <TouchableOpacity onPress={() => { setIsConnected(false); setMessages([]); setSessionId(''); }}>
+        <View style={styles.headerLeft}>
+          <View style={styles.connectedDot} />
+          <Text style={styles.headerText}>Connected</Text>
+        </View>
+        <TouchableOpacity onPress={handleDisconnect}>
           <Text style={styles.disconnectText}>Disconnect</Text>
         </TouchableOpacity>
       </View>
@@ -168,6 +249,7 @@ export default function ChatScreen() {
         ref={scrollViewRef}
         style={styles.messagesContainer}
         contentContainerStyle={styles.messagesContent}
+        keyboardShouldPersistTaps="handled"
       >
         {messages.map((msg, i) => (
           <View key={i} style={[styles.message, msg.role === 'user' ? styles.userMessage : styles.assistantMessage]}>
@@ -189,6 +271,7 @@ export default function ChatScreen() {
           value={message}
           onChangeText={setMessage}
           onSubmitEditing={handleSend}
+          onFocus={() => setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: true }), 300)}
           editable={!isLoading}
         />
         <TouchableOpacity
@@ -196,10 +279,10 @@ export default function ChatScreen() {
           onPress={handleSend}
           disabled={!message.trim() || isLoading}
         >
-          <Text style={styles.sendButtonText}>Send</Text>
+          <Ionicons name="send" size={20} color="#fff" />
         </TouchableOpacity>
       </View>
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -208,41 +291,62 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#1a1a2e',
   },
+  centerContent: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 40,
+  },
+  setupIcon: {
+    marginBottom: 20,
+  },
   title: {
-    fontSize: 28,
+    fontSize: 24,
     fontWeight: 'bold',
     color: '#fff',
     textAlign: 'center',
-    marginTop: 100,
+    marginBottom: 10,
   },
   subtitle: {
     fontSize: 16,
     color: '#888',
     textAlign: 'center',
-    marginTop: 10,
     marginBottom: 30,
   },
-  input: {
-    backgroundColor: '#2a2a4e',
-    color: '#fff',
-    padding: 15,
-    marginHorizontal: 20,
-    borderRadius: 10,
+  loadingText: {
+    color: '#888',
     fontSize: 16,
+    marginTop: 15,
+  },
+  errorMessage: {
+    color: '#888',
+    fontSize: 14,
+    textAlign: 'center',
+    marginBottom: 30,
+    lineHeight: 20,
   },
   button: {
     backgroundColor: '#6366f1',
-    padding: 15,
-    marginHorizontal: 20,
-    marginTop: 20,
-    borderRadius: 10,
+    flexDirection: 'row',
     alignItems: 'center',
-  },
-  buttonDisabled: {
-    opacity: 0.7,
+    gap: 8,
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+    borderRadius: 10,
+    marginTop: 10,
   },
   buttonText: {
     color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  secondaryButton: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: '#6366f1',
+  },
+  secondaryButtonText: {
+    color: '#6366f1',
     fontSize: 16,
     fontWeight: '600',
   },
@@ -253,6 +357,17 @@ const styles = StyleSheet.create({
     padding: 15,
     borderBottomWidth: 1,
     borderBottomColor: '#333',
+  },
+  headerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  connectedDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#4ade80',
   },
   headerText: {
     color: '#4ade80',
@@ -293,7 +408,9 @@ const styles = StyleSheet.create({
   },
   inputContainer: {
     flexDirection: 'row',
-    padding: 15,
+    paddingTop: 15,
+    paddingHorizontal: 15,
+    paddingBottom: 40,
     borderTopWidth: 1,
     borderTopColor: '#333',
     alignItems: 'center',
@@ -310,17 +427,14 @@ const styles = StyleSheet.create({
   },
   sendButton: {
     backgroundColor: '#6366f1',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderRadius: 24,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     marginLeft: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   sendButtonDisabled: {
     opacity: 0.5,
-  },
-  sendButtonText: {
-    color: '#fff',
-    fontWeight: '600',
-    fontSize: 15,
   },
 });

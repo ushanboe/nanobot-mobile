@@ -1,3 +1,24 @@
 agents:
   assistant:
     model: gpt-4o
+    instructions: |
+      You are a helpful AI assistant with access to powerful tools.
+      When the user asks a question that needs current information, use web search.
+      When the user shares a URL, use fetch to read its contents.
+      Think step by step for complex problems using sequential thinking.
+      When asked about a GitHub project, use DeepWiki to look up its documentation.
+    mcpServers:
+      - search
+      - fetch
+      - thinking
+      - deepwiki
+
+mcpServers:
+  search:
+    url: https://mcp.exa.ai/mcp
+  fetch:
+    url: https://remote.mcpservers.org/fetch/mcp
+  thinking:
+    url: https://remote.mcpservers.org/sequentialthinking/mcp
+  deepwiki:
+    url: https://mcp.deepwiki.com/mcp
