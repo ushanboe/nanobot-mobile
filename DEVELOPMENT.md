@@ -48,13 +48,19 @@ Nanobot was chosen over heavier alternatives (like OpenClaw with 4M+ lines) beca
 │  │  │ MCP Server  │  │   Agents    │  │    Tools    │  │    │
 │  │  │  /mcp/ui    │  │ (assistant) │  │   (chat)    │  │    │
 │  │  └─────────────┘  └─────────────┘  └─────────────┘  │    │
-│  └─────────────────────────────────────────────────────┘    │
-│                           │                                  │
-│                           ▼                                  │
-│              ┌─────────────────────┐                         │
-│              │   AI Provider API   │                         │
-│              │  (OpenAI/Anthropic) │                         │
-│              └─────────────────────┘                         │
+│  └──────────────────────────┬──────────────────────────┘    │
+│                              │                               │
+│              ┌───────────────┼───────────────┐               │
+│              ▼               ▼               ▼               │
+│  ┌──────────────────┐ ┌───────────┐ ┌──────────────────┐    │
+│  │ AI Provider API  │ │ Remote    │ │ Local MCP Srvrs  │    │
+│  │ (OpenAI/Claude)  │ │ MCP Srvrs │ │ (stdio subprocs) │    │
+│  │                  │ │ (Search,  │ │ ┌──────────────┐ │    │
+│  │                  │ │  Fetch,   │ │ │ Gmail MCP    │ │    │
+│  │                  │ │  Think,   │ │ │ MS365 MCP    │ │    │
+│  │                  │ │  DeepWiki)│ │ │ (email,drive)│ │    │
+│  └──────────────────┘ └───────────┘ │ └──────────────┘ │    │
+│                                     └──────────────────┘    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -65,8 +71,11 @@ Nanobot was chosen over heavier alternatives (like OpenClaw with 4M+ lines) beca
 ```
 nanobot-mobile/
 ├── backend/                    # Backend deployment files
-│   ├── Dockerfile              # Docker build for Railway
-│   ├── nanobot.yaml            # Nanobot configuration
+│   ├── Dockerfile              # Docker build for Railway (includes Node.js + MCP packages)
+│   ├── entrypoint.sh           # Startup script (writes OAuth creds from env vars)
+│   ├── nanobot.yaml            # Nanobot configuration (agents + MCP servers)
+│   ├── setup-gmail-token.js    # Local helper to obtain Gmail OAuth refresh token
+│   ├── .env.example            # Environment variable template
 │   └── railway.toml            # Railway deployment config
 │
 ├── mobile/                     # React Native Expo app
@@ -124,38 +133,28 @@ nanobot-mobile/
 **Dockerfile** (`backend/Dockerfile`):
 ```dockerfile
 FROM golang:1.25-alpine AS builder
-
 RUN apk add --no-cache git nodejs npm
-
 WORKDIR /app
-
-# Clone nanobot
 RUN git clone https://github.com/nanobot-ai/nanobot.git .
-
-# Build Go binary
 RUN go build -o nanobot .
 
-# Production image
 FROM alpine:latest
-
-RUN apk add --no-cache ca-certificates
-
+RUN apk add --no-cache ca-certificates nodejs npm
 WORKDIR /app
-
 COPY --from=builder /app/nanobot .
-
-# Copy config file
 COPY nanobot.yaml .
-
+COPY entrypoint.sh .
+RUN chmod +x entrypoint.sh
+RUN npm install -g @gongrzhe/server-gmail-autoauth-mcp @softeria/ms-365-mcp-server
 EXPOSE 8080
-
-CMD ["./nanobot", "run", "--config", "./nanobot.yaml", "--listen-address", "0.0.0.0:8080", "--disable-ui"]
+ENTRYPOINT ["./entrypoint.sh"]
 ```
 
-**Key flags explained**:
-- `--config ./nanobot.yaml` - Config path must start with `./`
-- `--listen-address 0.0.0.0:8080` - Listen on all interfaces
-- `--disable-ui` - Disable built-in web UI (was proxying to port 5173)
+**Key details**:
+- Production image includes `nodejs npm` for running MCP server subprocesses
+- Gmail and MS365 MCP packages are pre-installed globally
+- `entrypoint.sh` writes OAuth credential files from env vars before starting nanobot
+- `--disable-ui` flag prevents nanobot from starting its built-in web UI
 
 **Railway Configuration** (`backend/railway.toml`):
 ```toml
@@ -173,9 +172,60 @@ restartPolicyMaxRetries = 3
 agents:
   assistant:
     model: gpt-4o
+    instructions: |
+      You are a helpful AI assistant with access to powerful tools.
+      You can search the web, read URLs, think step by step, and look up GitHub docs.
+      You can access the user's Gmail, Outlook email, and OneDrive files.
+      When asked about emails, use the appropriate Gmail or Outlook tools.
+      When asked about files or documents in their cloud storage, use OneDrive tools.
+    mcpServers:
+      - search
+      - fetch
+      - thinking
+      - deepwiki
+      - gmail
+      - microsoft365
+
+mcpServers:
+  search:
+    url: https://mcp.exa.ai/mcp
+  fetch:
+    url: https://remote.mcpservers.org/fetch/mcp
+  thinking:
+    url: https://remote.mcpservers.org/sequentialthinking/mcp
+  deepwiki:
+    url: https://mcp.deepwiki.com/mcp
+  gmail:
+    command: npx
+    args: ["@gongrzhe/server-gmail-autoauth-mcp"]
+  microsoft365:
+    command: npx
+    args: ["-y", "@softeria/ms-365-mcp-server"]
 ```
 
-Supported models:
+### MCP Servers
+
+The assistant has access to 6 MCP servers — 4 remote (URL-based) and 2 local (stdio subprocesses):
+
+| Server | Type | What it does |
+|--------|------|--------------|
+| **Exa Search** | Remote | Web search — look up current events, latest docs |
+| **Fetch** | Remote | URL fetching — reads and summarizes web pages |
+| **Sequential Thinking** | Remote | Step-by-step reasoning for complex problems |
+| **DeepWiki** | Remote | GitHub docs lookup for any project |
+| **Gmail** | Local (stdio) | Gmail email — search, read, send emails |
+| **Microsoft 365** | Local (stdio) | Outlook email + OneDrive files — search, read, download |
+
+Remote servers are free and require no API keys. Local servers (Gmail, MS365) run as Node.js subprocesses inside the Docker container and require OAuth credentials (see OAuth Setup below).
+
+**Good test prompts:**
+- Search: *"What happened in the news today?"*
+- Fetch: *"Summarize this page: https://github.com/nanobot-ai/nanobot"*
+- Thinking: *"How would I design a login system? Think step by step."*
+- DeepWiki: *"Tell me about the nanobot-ai/nanobot project on GitHub"*
+
+### Supported Models
+
 - OpenAI: `gpt-4o`, `gpt-4`, `gpt-3.5-turbo`
 - Anthropic: `claude-3-5-sonnet-20241022`, `claude-3-opus-20240229`
 
@@ -185,6 +235,45 @@ Supported models:
 |----------|-------------|
 | `OPENAI_API_KEY` | OpenAI API key (required for OpenAI models) |
 | `ANTHROPIC_API_KEY` | Anthropic API key (required for Claude models) |
+| `GMAIL_OAUTH_KEYS_JSON` | Gmail OAuth client keys (from Google Cloud Console) |
+| `GMAIL_CREDENTIALS_JSON` | Gmail refresh token (from `setup-gmail-token.js`) |
+| `MS365_MCP_CLIENT_ID` | Azure app client ID |
+| `MS365_MCP_CLIENT_SECRET` | Azure app client secret |
+| `MS365_MCP_TENANT_ID` | Azure tenant ID (use `common` for personal accounts) |
+
+### OAuth Setup
+
+#### Gmail Setup
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/) → Create new project
+2. Enable the **Gmail API** under APIs & Services
+3. Go to **Credentials** → Create **OAuth 2.0 Client ID** (type: Desktop application)
+4. Download the JSON file → save as `gcp-oauth.keys.json` in `backend/`
+5. Run the setup script locally:
+   ```bash
+   cd backend
+   node setup-gmail-token.js
+   ```
+6. A browser opens for Google OAuth consent — grant access to Gmail
+7. The script outputs two JSON values
+8. Set in Railway environment variables:
+   - `GMAIL_OAUTH_KEYS_JSON` = contents of your `gcp-oauth.keys.json`
+   - `GMAIL_CREDENTIALS_JSON` = the token JSON output from the script
+
+#### Microsoft 365 Setup (Outlook + OneDrive)
+
+1. Go to [Azure Portal](https://portal.azure.com/) → **App Registrations** → **New registration**
+2. Note the **Application (client) ID** and **Directory (tenant) ID**
+3. Go to **Certificates & secrets** → create a new **Client secret**
+4. Go to **API permissions** → Add permissions:
+   - `Mail.Read`, `Mail.Send` (for Outlook email)
+   - `Files.Read`, `Files.ReadWrite` (for OneDrive)
+   - `User.Read` (basic profile)
+5. **Grant admin consent** (or let user consent on first use)
+6. Set in Railway environment variables:
+   - `MS365_MCP_CLIENT_ID` = Application (client) ID
+   - `MS365_MCP_CLIENT_SECRET` = Client secret value
+   - `MS365_MCP_TENANT_ID` = `common` (for personal Microsoft accounts)
 
 ### Railway Deployment Steps
 
@@ -419,7 +508,7 @@ const response = await fetch(`${serverUrl}/mcp/ui`, {
 // Response: { result: { tools: [{ name: 'chat-with-assistant', ... }] } }
 ```
 
-#### 3. Call a Tool (Send Message)
+#### 3. Call a Tool (Send Text Message)
 
 ```javascript
 const response = await fetch(`${serverUrl}/mcp/ui`, {
@@ -444,10 +533,57 @@ const response = await fetch(`${serverUrl}/mcp/ui`, {
 // Response: { result: { content: [{ type: 'text', text: 'I am doing well...' }] } }
 ```
 
+#### 4. Call a Tool (Send Image Attachment — Multimodal)
+
+```javascript
+// Images are sent as base64 data URIs in the attachments array
+const response = await fetch(`${serverUrl}/mcp/ui`, {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Mcp-Session-Id': sessionId
+  },
+  body: JSON.stringify({
+    jsonrpc: '2.0',
+    id: Date.now().toString(),
+    method: 'tools/call',
+    params: {
+      name: 'chat-with-assistant',
+      arguments: {
+        prompt: 'What do you see in this image?',
+        attachments: [{
+          url: 'data:image/jpeg;base64,/9j/4AAQ...', // base64-encoded image
+          mimeType: 'image/jpeg',
+          name: 'photo.jpg'
+        }]
+      }
+    }
+  })
+});
+
+// Nanobot pipeline: attachments → inlineAttachments() → MCP Content{type:"image"} → OpenAI image_url
+// Supported image types: image/png, image/jpeg, image/webp
+```
+
 ### Available Tools
 
-The default nanobot configuration exposes:
-- `chat-with-assistant` - Main chat tool with `prompt` argument
+The nanobot configuration exposes:
+- `chat-with-assistant` - Main chat tool with `prompt` argument and optional `attachments` array for multimodal image input
+
+The assistant agent also has access to tools provided by the 4 remote MCP servers (search, fetch, sequential thinking, DeepWiki). These tools are invoked server-side by the AI model — the mobile app only calls `chat-with-assistant` and the backend handles tool orchestration.
+
+### Image Attachment Pipeline
+
+When a user sends a photo, the mobile app:
+1. Picks image via `expo-image-picker` (quality 0.4 to keep base64 small)
+2. On send, converts to base64 via `expo-file-system` `readAsStringAsync`
+3. Builds a data URI: `data:image/jpeg;base64,<data>`
+4. Sends as `attachments` array in the `chat-with-assistant` tool arguments
+
+The nanobot backend then:
+1. `inlineAttachments()` extracts the base64 data from the URL
+2. `convertToSampleRequest()` converts to MCP `Content{type:"image"}`
+3. Sends to OpenAI as `ContentPart{type:"image_url"}` for GPT-4o vision
 
 ---
 
@@ -677,6 +813,81 @@ agents:
 
 **Note**: The Settings screen doesn't have this issue because it uses a `ScrollView` as its root container, which naturally scrolls when the keyboard opens.
 
+### 11. Image Attachments Freeze App
+
+**Error**: App freezes/becomes unresponsive when attaching and sending images. Send button stops working entirely even after restart.
+
+**Cause**: Converting large images to base64 synchronously on pick (via `ImagePicker.launchImageLibraryAsync({ base64: true })`) creates multi-MB strings that block the React Native JS thread.
+
+**Solution** (three changes):
+1. Removed `base64: true` from ImagePicker options — pick only returns a URI
+2. Moved base64 conversion to send time using `FileSystem.readAsStringAsync()` with try/catch
+3. Lowered image quality from 0.8 to 0.4 to reduce base64 payload size
+
+---
+
+## On-Device Features
+
+### Text-to-Speech (TTS)
+
+**Package**: `expo-speech`
+
+Each assistant message bubble has a speaker icon button. Tapping it reads the message aloud via `Speech.speak()`. Tapping again (or tapping a different message) stops playback.
+
+**Implementation** (`app/(tabs)/index.tsx`):
+- `speakingIndex` state tracks which message is currently being spoken
+- `handleSpeak(text, index)` toggles speech on/off
+- Icon changes between `volume-medium-outline` (idle) and `stop-circle-outline` (speaking)
+- Speech callbacks (`onDone`, `onStopped`, `onError`) reset the speaking state
+
+### ChatInput Component
+
+**File**: `components/ChatInput.tsx`
+
+Rich input bar with attachment buttons + mic + text input + send button:
+
+| Button | Icon | Action | Package |
+|--------|------|--------|---------|
+| Gallery | `image-outline` | Pick image from photo library | `expo-image-picker` |
+| Camera | `camera-outline` | Take new photo | `expo-image-picker` |
+| File | `document-outline` | Pick any file type | `expo-document-picker` |
+| Mic | `mic-outline` / `mic` | Toggle voice input | `expo-speech-recognition` |
+
+**Attachment flow**:
+1. User taps an attachment button → picker opens
+2. Selected file/image added to `attachments` state array (images include base64 from ImagePicker)
+3. Preview appears above the input bar (thumbnail for images, icon + filename for files)
+4. User can remove attachments via the X button overlay
+5. On send: attachments passed to `onSend` callback with base64 data
+6. Parent (`index.tsx`) builds nanobot `attachments` array with data URIs and sends via MCP
+
+**Image quality**: 0.4 (40%) — balances visual quality with base64 payload size to avoid freezing the JS thread.
+
+### Speech-to-Text (STT)
+
+**Package**: `expo-speech-recognition`
+
+On-device speech recognition using Android's `SpeechRecognizer` / iOS's `SFSpeechRecognizer`. No API keys needed.
+
+**Implementation** (`components/ChatInput.tsx`):
+- `isListening` state tracks whether voice input is active
+- `toggleListening()` starts/stops recognition via `ExpoSpeechRecognitionModule`
+- `useSpeechRecognitionEvent('result')` updates the text input with transcribed speech in real-time
+- `useSpeechRecognitionEvent('end')` resets listening state
+- `useSpeechRecognitionEvent('error')` handles permission denials
+- Options: `lang: 'en-US'`, `interimResults: true`, `addsPunctuation: true`
+
+**Visual feedback**:
+- Mic icon changes from outline to filled red when listening
+- TextInput border turns red, placeholder changes to "Listening..."
+- Sending while listening auto-stops recognition
+
+### Haptic Feedback
+
+**Package**: `expo-haptics`
+
+Light impact feedback (`ImpactFeedbackStyle.Light`) fires on every message send.
+
 ---
 
 ## UI/UX Design
@@ -716,15 +927,45 @@ Defined in `mobile/constants/theme.ts` with full light and dark palettes:
 
 ## Future Improvements
 
-### Planned Features
+### Planned Features — App
 
 1. **iOS Build**: TestFlight distribution via EAS
 2. **Streaming Responses**: Wire up SSE streaming in the chat UI (MCPClient supports it)
 3. **Multiple Conversations**: Use Zustand thread management in the UI
-4. **Image Attachments**: Wire ChatInput component into the main chat screen
-5. **Custom Tools**: Allow users to configure additional MCP tools
-6. **Offline Mode**: Queue messages when offline
-7. **Agent Selection**: UI for switching between agents
+4. **Offline Mode**: Queue messages when offline
+5. **Agent Selection**: UI for switching between agents (executor, explorer, planner already available)
+6. **Auto-include GPS location**: Attach device coordinates to messages so AI is location-aware (`expo-location`)
+7. **Auto-include phone orientation**: Attach accelerometer/gyroscope data (`expo-sensors`)
+
+### Planned Features — Personal Services
+
+1. **SMS/Text messages**: Most complex remaining personal service
+   - **Android only**: On-device SMS reading via React Native SMS library + `READ_SMS` permission
+   - **iOS**: Not possible — Apple blocks SMS API access entirely
+   - **Alternative**: Cloud messaging via Google Voice/Twilio APIs
+   - Example: *"Did Mary reply to my text?"*
+
+2. **Google Drive**: Similar to OneDrive pattern, using a Google Drive MCP server
+   - Would use OAuth from same Google Cloud project as Gmail
+
+### Planned Features — AI-Initiated Device Access
+
+For the AI to proactively use device sensors (camera, GPS), several architectural approaches exist:
+
+1. **Auto-include context (easiest)**: App silently attaches GPS/orientation data to every message. No architecture change. Toggle in Settings.
+
+2. **AI-requested actions via response parsing (medium)**: AI responds with structured action requests (e.g., `{"action": "take_photo"}`), app detects and executes. Convention-based, requires system prompt instructions.
+
+3. **Client-side MCP server (most powerful)**: Mobile app acts as both MCP client AND server. AI can call tools like `take-photo`, `get-location`, `get-orientation` that execute on the device. Requires persistent WebSocket/SSE connection for backend→device push. Most complex but enables fully autonomous AI+device interaction.
+
+**Available Expo packages for device access:**
+
+| Sensor | Package | Data |
+|--------|---------|------|
+| Camera | `expo-camera` | Programmatic photo/video capture |
+| GPS | `expo-location` | Lat/lng, altitude, speed, heading, background tracking |
+| Orientation | `expo-sensors` | Accelerometer, gyroscope, magnetometer, barometer |
+| Pedometer | `expo-sensors` | Step counter |
 
 ### Code Improvements
 
@@ -736,6 +977,19 @@ Defined in `mobile/constants/theme.ts` with full light and dark palettes:
 6. Set up CI/CD pipeline
 7. Add custom app icons and splash screen
 8. Replace `com.yourcompany.nanobot` with real package/bundle identifiers
+
+### Completed
+
+- ~~Custom MCP Tools~~: Added 4 remote MCP servers (Exa Search, Fetch, Sequential Thinking, DeepWiki)
+- ~~Text-to-Speech~~: Speaker icon on assistant messages via `expo-speech` — tap to listen, tap again to stop
+- ~~Camera/Gallery Integration~~: ChatInput component wired into main chat screen with `expo-image-picker`
+- ~~Document Picker~~: File attachment support via `expo-document-picker`
+- ~~Multimodal Image Attachments~~: Photos sent as base64 data URIs to nanobot `attachments` array for GPT-4o vision
+- ~~Speech-to-Text~~: Mic button in ChatInput via `expo-speech-recognition` — on-device recognition, real-time transcription
+- ~~Gmail Integration~~: `@gongrzhe/server-gmail-autoauth-mcp` as stdio MCP server — search, read, send emails
+- ~~Microsoft 365 Integration~~: `@softeria/ms-365-mcp-server` as stdio MCP server — Outlook email + OneDrive files
+- ~~Document Attachment Fix~~: File attachments now read as base64 via `expo-file-system` and sent to backend
+- ~~Debug Logging Cleanup~~: Removed console.log and debug fallback messages from chat response handler
 
 ---
 

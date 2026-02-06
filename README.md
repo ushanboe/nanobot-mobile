@@ -84,11 +84,15 @@ cd android && ./gradlew assembleRelease
 ## Features
 
 - Chat with GPT-4o / Claude via your own API keys
+- **AI tools via MCP servers**: web search (Exa), URL fetching, step-by-step reasoning, GitHub project lookup (DeepWiki)
+- **Multimodal image support**: Send photos to GPT-4o for visual analysis (camera or gallery)
+- **Text-to-Speech**: Tap the speaker icon on any assistant message to hear it read aloud
+- **Attachments**: Camera photos, gallery images, and document/file picker
 - MCP protocol (JSON-RPC 2.0) communication
 - Dark theme UI with indigo accents
 - Auto-connect on app launch
 - Keyboard-aware chat input (adjustPan on Android)
-- Image attachments from camera/gallery (ChatInput component)
+- Haptic feedback on send
 - Secure credential storage (expo-secure-store)
 - Settings persist via AsyncStorage
 
@@ -114,8 +118,17 @@ cd android && ./gradlew assembleRelease
 | File | Purpose |
 |------|---------|
 | `Dockerfile` | Multi-stage Go build for Railway |
-| `nanobot.yaml` | Agent configuration (model: gpt-4o) |
+| `nanobot.yaml` | Agent config (GPT-4o + 4 MCP servers) |
 | `railway.toml` | Railway deployment config |
+
+### MCP Servers (Backend Tools)
+
+| Server | URL | Purpose |
+|--------|-----|---------|
+| Exa Search | `mcp.exa.ai` | Web search for current information |
+| Fetch | `remote.mcpservers.org/fetch` | Read and summarize URLs |
+| Sequential Thinking | `remote.mcpservers.org/sequentialthinking` | Step-by-step reasoning |
+| DeepWiki | `mcp.deepwiki.com` | GitHub project documentation lookup |
 
 ## Environment Variables
 

@@ -19,7 +19,8 @@
       "infoPlist": {
         "NSCameraUsageDescription": "Allow Nanobot to access your camera to attach photos to messages",
         "NSPhotoLibraryUsageDescription": "Allow Nanobot to access your photos to attach images to messages",
-        "NSMicrophoneUsageDescription": "Allow Nanobot to access your microphone for voice input"
+        "NSMicrophoneUsageDescription": "Allow Nanobot to access your microphone for voice input",
+        "NSSpeechRecognitionUsageDescription": "Allow Nanobot to use speech recognition for voice input"
       }
     },
     "android": {
@@ -49,7 +50,8 @@
           "photosPermission": "Allow Nanobot to access your photos to attach images to messages",
           "cameraPermission": "Allow Nanobot to access your camera to attach photos to messages"
         }
-      ]
+      ],
+      "expo-speech-recognition"
     ],
     "experiments": {
       "typedRoutes": true

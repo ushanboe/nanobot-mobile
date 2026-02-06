@@ -45,3 +45,5 @@ yarn-error.*
 
 # Backend
 backend/nanobot.db
+backend/gcp-oauth.keys.json
+backend/gcp-oauth.keys.json:Zone.Identifier

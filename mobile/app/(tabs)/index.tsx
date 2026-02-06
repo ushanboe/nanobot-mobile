@@ -1,8 +1,11 @@
 // Main chat screen with proper nanobot integration
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, Text, Image, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import * as Speech from 'expo-speech';
+import * as FileSystem from 'expo-file-system';
+import { ChatInput } from '../../components/ChatInput';
 import { loadSettings, type Settings } from '../../utils/settings';
 
 export default function ChatScreen() {
@@ -11,12 +14,27 @@ export default function ChatScreen() {
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [isConnected, setIsConnected] = useState(false);
   const [sessionId, setSessionId] = useState('');
-  const [message, setMessage] = useState('');
-  const [messages, setMessages] = useState<Array<{role: string, text: string}>>([]);
+  const [messages, setMessages] = useState<Array<{role: string, text: string, imageUri?: string}>>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [availableTools, setAvailableTools] = useState<string[]>([]);
+  const [speakingIndex, setSpeakingIndex] = useState<number | null>(null);
   const scrollViewRef = useRef<ScrollView>(null);
   const hasConnectedRef = useRef(false);
+
+  const handleSpeak = async (text: string, index: number) => {
+    if (speakingIndex === index) {
+      Speech.stop();
+      setSpeakingIndex(null);
+      return;
+    }
+    Speech.stop();
+    setSpeakingIndex(index);
+    Speech.speak(text, {
+      onDone: () => setSpeakingIndex(null),
+      onStopped: () => setSpeakingIndex(null),
+      onError: () => setSpeakingIndex(null),
+    });
+  };
 
   // Load settings on focus (to pick up changes from Settings tab)
   useFocusEffect(
@@ -102,18 +120,64 @@ export default function ChatScreen() {
     }
   };
 
-  const handleSend = async () => {
-    if (!message.trim() || isLoading) return;
+  const handleSend = async (text: string, attachments?: Array<{ type: string; uri: string; name: string; mimeType: string; base64?: string }>) => {
+    if ((!text.trim() && (!attachments || attachments.length === 0)) || isLoading) return;
 
-    const userMessage = message.trim();
-    setMessages(prev => [...prev, { role: 'user', text: userMessage }]);
-    setMessage('');
+    const userMessage = text.trim();
+    const hasAttachments = attachments && attachments.length > 0;
+
+    // Use the file URI directly for display
+    const imageUri = hasAttachments && attachments[0].type === 'image'
+      ? attachments[0].uri
+      : undefined;
+
+    setMessages(prev => [...prev, { role: 'user', text: userMessage || '[Attachment]', imageUri }]);
     setIsLoading(true);
 
     setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: true }), 100);
 
+    const prompt = userMessage || 'What do you see in this image?';
+
+    // Build nanobot attachments array from image and file data
+    let nanobotAttachments: Array<{ url: string; mimeType: string; name: string }> | undefined;
+    if (hasAttachments) {
+      const processed = [];
+      for (const a of attachments) {
+        if (a.type === 'image' && a.base64) {
+          // Images already have base64 from ImagePicker
+          processed.push({
+            url: `data:${a.mimeType};base64,${a.base64}`,
+            mimeType: a.mimeType,
+            name: a.name,
+          });
+        } else if (a.type === 'file' && a.uri) {
+          // Read file attachments as base64 via FileSystem
+          try {
+            const fileBase64 = await FileSystem.readAsStringAsync(a.uri, {
+              encoding: FileSystem.EncodingType.Base64,
+            });
+            processed.push({
+              url: `data:${a.mimeType};base64,${fileBase64}`,
+              mimeType: a.mimeType,
+              name: a.name,
+            });
+          } catch {
+            // If file read fails, skip this attachment
+          }
+        }
+      }
+      if (processed.length > 0) {
+        nanobotAttachments = processed;
+      }
+    }
+
+    // Build tool arguments — include attachments if we have data
+    const toolArguments: Record<string, unknown> = { prompt };
+    if (nanobotAttachments && nanobotAttachments.length > 0) {
+      toolArguments.attachments = nanobotAttachments;
+    }
+
     try {
-      // Call the 'chat-with-assistant' tool
       const response = await fetch(`${settings?.serverUrl}/mcp/ui`, {
         method: 'POST',
         headers: {
@@ -126,9 +190,7 @@ export default function ChatScreen() {
           method: 'tools/call',
           params: {
             name: 'chat-with-assistant',
-            arguments: {
-              prompt: userMessage
-            }
+            arguments: toolArguments
           }
         })
       });
@@ -140,7 +202,6 @@ export default function ChatScreen() {
 
       const data = await response.json();
 
-      // Extract the response text
       let responseText = 'No response';
       if (data.result?.content) {
         for (const item of data.result.content) {
@@ -253,7 +314,22 @@ export default function ChatScreen() {
       >
         {messages.map((msg, i) => (
           <View key={i} style={[styles.message, msg.role === 'user' ? styles.userMessage : styles.assistantMessage]}>
+            {msg.imageUri && (
+              <Image source={{ uri: msg.imageUri }} style={styles.messageImage} />
+            )}
             <Text style={styles.messageText}>{msg.text}</Text>
+            {msg.role === 'assistant' && msg.text && (
+              <TouchableOpacity
+                style={styles.speakButton}
+                onPress={() => handleSpeak(msg.text, i)}
+              >
+                <Ionicons
+                  name={speakingIndex === i ? 'stop-circle-outline' : 'volume-medium-outline'}
+                  size={18}
+                  color={speakingIndex === i ? '#f87171' : '#888'}
+                />
+              </TouchableOpacity>
+            )}
           </View>
         ))}
         {isLoading && (
@@ -263,24 +339,12 @@ export default function ChatScreen() {
         )}
       </ScrollView>
 
-      <View style={styles.inputContainer}>
-        <TextInput
-          style={styles.chatInput}
-          placeholder="Type a message..."
-          placeholderTextColor="#666"
-          value={message}
-          onChangeText={setMessage}
-          onSubmitEditing={handleSend}
-          onFocus={() => setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: true }), 300)}
-          editable={!isLoading}
+      <View style={styles.inputWrapper}>
+        <ChatInput
+          onSend={handleSend}
+          disabled={!isConnected}
+          isSending={isLoading}
         />
-        <TouchableOpacity
-          style={[styles.sendButton, (!message.trim() || isLoading) && styles.sendButtonDisabled]}
-          onPress={handleSend}
-          disabled={!message.trim() || isLoading}
-        >
-          <Ionicons name="send" size={20} color="#fff" />
-        </TouchableOpacity>
       </View>
     </KeyboardAvoidingView>
   );
@@ -406,35 +470,18 @@ const styles = StyleSheet.create({
     fontSize: 15,
     lineHeight: 22,
   },
-  inputContainer: {
-    flexDirection: 'row',
-    paddingTop: 15,
-    paddingHorizontal: 15,
-    paddingBottom: 40,
-    borderTopWidth: 1,
-    borderTopColor: '#333',
-    alignItems: 'center',
+  speakButton: {
+    alignSelf: 'flex-end',
+    marginTop: 6,
+    padding: 4,
   },
-  chatInput: {
-    flex: 1,
-    backgroundColor: '#2a2a4e',
-    color: '#fff',
-    padding: 12,
-    paddingHorizontal: 16,
-    borderRadius: 24,
-    fontSize: 15,
-    maxHeight: 100,
+  messageImage: {
+    width: 200,
+    height: 150,
+    borderRadius: 8,
+    marginBottom: 8,
   },
-  sendButton: {
-    backgroundColor: '#6366f1',
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    marginLeft: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  sendButtonDisabled: {
-    opacity: 0.5,
+  inputWrapper: {
+    paddingBottom: 25,
   },
 });

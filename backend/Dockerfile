@@ -14,15 +14,20 @@ RUN go build -o nanobot .
 # Production image
 FROM alpine:latest
 
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates nodejs npm
 
 WORKDIR /app
 
 COPY --from=builder /app/nanobot .
 
-# Copy config file
+# Copy config and entrypoint
 COPY nanobot.yaml .
+COPY entrypoint.sh .
+RUN chmod +x entrypoint.sh
+
+# Pre-install MCP server packages globally
+RUN npm install -g @gongrzhe/server-gmail-autoauth-mcp @softeria/ms-365-mcp-server
 
 EXPOSE 8080
 
-CMD ["./nanobot", "run", "--config", "./nanobot.yaml", "--listen-address", "0.0.0.0:8080", "--disable-ui"]
+ENTRYPOINT ["./entrypoint.sh"]

@@ -7,11 +7,17 @@ agents:
       When the user shares a URL, use fetch to read its contents.
       Think step by step for complex problems using sequential thinking.
       When asked about a GitHub project, use DeepWiki to look up its documentation.
+      You can access the user's Gmail to search, read, and send emails.
+      You can access the user's Microsoft 365 account for Outlook email and OneDrive files.
+      When asked about emails, use the appropriate Gmail or Outlook tools.
+      When asked about files or documents in their cloud storage, use OneDrive tools to search and retrieve them.
     mcpServers:
       - search
       - fetch
       - thinking
       - deepwiki
+      - gmail
+      - microsoft365
 
 mcpServers:
   search:
@@ -22,3 +28,9 @@ mcpServers:
     url: https://remote.mcpservers.org/sequentialthinking/mcp
   deepwiki:
     url: https://mcp.deepwiki.com/mcp
+  gmail:
+    command: npx
+    args: ["@gongrzhe/server-gmail-autoauth-mcp"]
+  microsoft365:
+    command: npx
+    args: ["-y", "@softeria/ms-365-mcp-server"]

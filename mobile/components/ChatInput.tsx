@@ -1,7 +1,8 @@
-// Chat input component with attachment support
+// Chat input component with attachment and voice input support
 import React, { useState } from 'react';
 import {
   View,
+  Text,
   TextInput,
   TouchableOpacity,
   StyleSheet,
@@ -13,13 +14,17 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
-import * as FileSystem from 'expo-file-system';
+import * as DocumentPicker from 'expo-document-picker';
 import * as Haptics from 'expo-haptics';
+import {
+  ExpoSpeechRecognitionModule,
+  useSpeechRecognitionEvent,
+} from 'expo-speech-recognition';
 import { Colors, Spacing, FontSizes } from '@/constants/theme';
 import type { Attachment } from '@/types/mcp';
 
 interface Props {
-  onSend: (text: string, attachments?: Array<{ type: string; data: string; mimeType: string }>) => void;
+  onSend: (text: string, attachments?: Array<{ type: string; uri: string; name: string; mimeType: string; base64?: string }>) => void;
   disabled?: boolean;
   isSending?: boolean;
 }
@@ -29,28 +34,65 @@ export function ChatInput({ onSend, disabled, isSending }: Props) {
   const colors = Colors[colorScheme === 'dark' ? 'dark' : 'light'];
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [isListening, setIsListening] = useState(false);
 
-  const handleSend = async () => {
+  // Speech recognition event handlers
+  useSpeechRecognitionEvent('result', (event) => {
+    if (event.results && event.results.length > 0) {
+      setText(event.results[0].transcript);
+    }
+  });
+
+  useSpeechRecognitionEvent('end', () => {
+    setIsListening(false);
+  });
+
+  useSpeechRecognitionEvent('error', (event) => {
+    setIsListening(false);
+    if (event.error === 'not-allowed') {
+      Alert.alert('Permission needed', 'Please grant microphone and speech recognition permissions.');
+    }
+  });
+
+  const toggleListening = async () => {
+    if (isListening) {
+      ExpoSpeechRecognitionModule.stop();
+      return;
+    }
+
+    const { granted } = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+    if (!granted) {
+      Alert.alert('Permission needed', 'Please grant microphone and speech recognition permissions to use voice input.');
+      return;
+    }
+
+    setIsListening(true);
+    ExpoSpeechRecognitionModule.start({
+      lang: 'en-US',
+      interimResults: true,
+      addsPunctuation: true,
+    });
+  };
+
+  const handleSend = () => {
     if ((!text.trim() && attachments.length === 0) || disabled || isSending) return;
+
+    // Stop listening if active
+    if (isListening) {
+      ExpoSpeechRecognitionModule.stop();
+      setIsListening(false);
+    }
 
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
-    // Convert attachments to base64 format
-    const formattedAttachments = await Promise.all(
-      attachments.map(async (att) => {
-        let base64 = att.base64;
-        if (!base64 && att.uri) {
-          base64 = await FileSystem.readAsStringAsync(att.uri, {
-            encoding: FileSystem.EncodingType.Base64,
-          });
-        }
-        return {
-          type: att.type,
-          data: base64 || '',
-          mimeType: att.mimeType,
-        };
-      })
-    );
+    // Pass attachments directly — base64 was captured at pick time by ImagePicker
+    const formattedAttachments = attachments.map((att) => ({
+      type: att.type,
+      uri: att.uri,
+      name: att.name,
+      mimeType: att.mimeType,
+      base64: att.base64,
+    }));
 
     onSend(text.trim(), formattedAttachments.length > 0 ? formattedAttachments : undefined);
     setText('');
@@ -66,7 +108,7 @@ export function ChatInput({ onSend, disabled, isSending }: Props) {
 
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      quality: 0.8,
+      quality: 0.4,
       base64: true,
     });
 
@@ -79,7 +121,7 @@ export function ChatInput({ onSend, disabled, isSending }: Props) {
           uri: asset.uri,
           name: asset.fileName || 'image.jpg',
           mimeType: asset.mimeType || 'image/jpeg',
-          base64: asset.base64 ?? undefined,
+          base64: asset.base64 || undefined,
         },
       ]);
     }
@@ -93,7 +135,7 @@ export function ChatInput({ onSend, disabled, isSending }: Props) {
     }
 
     const result = await ImagePicker.launchCameraAsync({
-      quality: 0.8,
+      quality: 0.4,
       base64: true,
     });
 
@@ -106,7 +148,27 @@ export function ChatInput({ onSend, disabled, isSending }: Props) {
           uri: asset.uri,
           name: 'photo.jpg',
           mimeType: 'image/jpeg',
-          base64: asset.base64 ?? undefined,
+          base64: asset.base64 || undefined,
+        },
+      ]);
+    }
+  };
+
+  const pickDocument = async () => {
+    const result = await DocumentPicker.getDocumentAsync({
+      type: '*/*',
+      copyToCacheDirectory: true,
+    });
+
+    if (!result.canceled && result.assets[0]) {
+      const asset = result.assets[0];
+      setAttachments((prev) => [
+        ...prev,
+        {
+          type: 'file' as const,
+          uri: asset.uri,
+          name: asset.name || 'document',
+          mimeType: asset.mimeType || 'application/octet-stream',
         },
       ]);
     }
@@ -130,7 +192,14 @@ export function ChatInput({ onSend, disabled, isSending }: Props) {
         >
           {attachments.map((att, index) => (
             <View key={index} style={styles.attachmentPreview}>
-              <Image source={{ uri: att.uri }} style={styles.attachmentImage} />
+              {att.type === 'image' ? (
+                <Image source={{ uri: att.uri }} style={styles.attachmentImage} />
+              ) : (
+                <View style={[styles.filePreview, { backgroundColor: colors.background }]}>
+                  <Ionicons name="document-outline" size={28} color={colors.textSecondary} />
+                  <Text style={[styles.fileName, { color: colors.text }]} numberOfLines={2}>{att.name}</Text>
+                </View>
+              )}
               <TouchableOpacity
                 style={[styles.removeButton, { backgroundColor: colors.error }]}
                 onPress={() => removeAttachment(index)}
@@ -160,6 +229,27 @@ export function ChatInput({ onSend, disabled, isSending }: Props) {
           <Ionicons name="camera-outline" size={24} color={colors.textSecondary} />
         </TouchableOpacity>
 
+        <TouchableOpacity
+          style={[styles.iconButton, { opacity: disabled ? 0.5 : 1 }]}
+          onPress={pickDocument}
+          disabled={disabled}
+        >
+          <Ionicons name="document-outline" size={24} color={colors.textSecondary} />
+        </TouchableOpacity>
+
+        {/* Mic button */}
+        <TouchableOpacity
+          style={[styles.iconButton, { opacity: disabled ? 0.5 : 1 }]}
+          onPress={toggleListening}
+          disabled={disabled || isSending}
+        >
+          <Ionicons
+            name={isListening ? 'mic' : 'mic-outline'}
+            size={24}
+            color={isListening ? colors.error : colors.textSecondary}
+          />
+        </TouchableOpacity>
+
         {/* Text input */}
         <TextInput
           style={[
@@ -167,11 +257,11 @@ export function ChatInput({ onSend, disabled, isSending }: Props) {
             {
               backgroundColor: colors.background,
               color: colors.text,
-              borderColor: colors.border,
+              borderColor: isListening ? colors.error : colors.border,
             },
           ]}
-          placeholder="Message..."
-          placeholderTextColor={colors.textSecondary}
+          placeholder={isListening ? 'Listening...' : 'Message...'}
+          placeholderTextColor={isListening ? colors.error : colors.textSecondary}
           value={text}
           onChangeText={setText}
           multiline
@@ -223,6 +313,19 @@ const styles = StyleSheet.create({
     width: 80,
     height: 80,
     borderRadius: 8,
+  },
+  filePreview: {
+    width: 80,
+    height: 80,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 4,
+  },
+  fileName: {
+    fontSize: 10,
+    textAlign: 'center',
+    marginTop: 2,
   },
   removeButton: {
     position: 'absolute',
