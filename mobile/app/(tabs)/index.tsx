@@ -189,7 +189,7 @@ export default function ChatScreen() {
           id: Date.now().toString(),
           method: 'tools/call',
           params: {
-            name: 'chat-with-assistant',
+            name: availableTools[0] || 'chat',
             arguments: toolArguments
           }
         })
