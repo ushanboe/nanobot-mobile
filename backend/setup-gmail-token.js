@@ -109,12 +109,15 @@ async function main() {
     process.exit(1);
   }
 
-  // Build the credentials object matching what the Gmail MCP server expects
+  // Build the credentials object matching what the Gmail MCP server writes internally.
+  // The server uses: fs.writeFileSync(CREDENTIALS_PATH, JSON.stringify(tokens))
+  // So credentials.json must contain the raw token object from Google OAuth.
   const credentials = {
-    type: 'authorized_user',
-    client_id: clientId,
-    client_secret: clientSecret,
+    access_token: tokens.access_token,
     refresh_token: tokens.refresh_token,
+    scope: tokens.scope,
+    token_type: tokens.token_type || 'Bearer',
+    expiry_date: tokens.expiry_date || (Date.now() + (tokens.expires_in || 3600) * 1000),
   };
 
   console.log('=== SUCCESS ===\n');
@@ -123,6 +126,8 @@ async function main() {
   console.log(keysRaw.trim());
   console.log('\nGMAIL_CREDENTIALS_JSON:');
   console.log(JSON.stringify(credentials));
+  console.log('\nNote: The access_token expires in ~1 hour but the refresh_token is');
+  console.log('long-lived. The Gmail MCP server will auto-refresh using the refresh_token.');
   console.log('\n=== Done! ===');
 }
 

@@ -874,6 +874,42 @@ agents:
 
 **Solution**: Mobile app calls `tools/list` on connect and stores tool names in `availableTools` state. When sending messages, uses `availableTools[0] || 'chat'` instead of a hardcoded name. Works with any nanobot version.
 
+### 15. Gmail MCP Server Asks User to Log In Despite Credentials
+
+**Error**: AI responds with "I need you to log in to your Google account" even though `GMAIL_OAUTH_KEYS_JSON` and `GMAIL_CREDENTIALS_JSON` are set in Railway.
+
+**Cause**: The `credentials.json` file must contain a **token object** with `refresh_token`, not the OAuth client keys. Common mistakes:
+- Setting `GMAIL_CREDENTIALS_JSON` to the Google Cloud Console download (wrong — that's the keys file)
+- Using `authorized_user` format instead of the raw token format
+- Missing `refresh_token` field (needed for headless token refresh)
+
+**Solution**:
+1. Run `node backend/setup-gmail-token.js` locally to complete the OAuth browser flow
+2. The script outputs the correct token JSON with `access_token`, `refresh_token`, `expiry_date`
+3. Set that output as `GMAIL_CREDENTIALS_JSON` in Railway
+4. Set the Google Cloud Console download as `GMAIL_OAUTH_KEYS_JSON`
+
+**Expected credential formats:**
+```
+GMAIL_OAUTH_KEYS_JSON = {"installed":{"client_id":"...","client_secret":"...",...}}
+GMAIL_CREDENTIALS_JSON = {"access_token":"ya29.xxx","refresh_token":"1//xxx","expiry_date":1700000000000,...}
+```
+
+The entrypoint logs "refresh_token: present" or "WARNING: no refresh_token" to help diagnose this.
+
+### 16. MS365 Device Code Login Required After Every Deploy
+
+**Error**: User must go to microsoft.com/devicelogin and enter a code every time Railway redeploys the container.
+
+**Cause**: The `@softeria/ms-365-mcp-server` caches OAuth tokens in a file on disk. Railway's filesystem is **ephemeral** — all files are lost on container restart/redeploy. The token cache is destroyed, requiring re-authentication.
+
+**Current behavior**: This is expected. The device code flow is the default auth method for stdio mode. On first chat request involving MS365 tools, the AI will present a device code URL. The user completes login once per container lifecycle.
+
+**Workarounds** (not yet implemented):
+- **Railway Volumes**: Mount persistent storage at the MSAL token cache path
+- **BYOT mode**: Set `MS365_MCP_OAUTH_TOKEN` env var with a pre-authenticated access token (requires external refresh management since tokens expire in ~1 hour)
+- **Pre-authenticate locally**: Run `npx @softeria/ms-365-mcp-server --login` locally, extract the token cache, and bake it into the container. Refresh tokens last ~90 days.
+
 ---
 
 ## On-Device Features
