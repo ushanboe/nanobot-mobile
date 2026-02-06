@@ -135,7 +135,9 @@ nanobot-mobile/
 FROM golang:1.25-alpine AS builder
 RUN apk add --no-cache git nodejs npm
 WORKDIR /app
-RUN git clone https://github.com/nanobot-ai/nanobot.git .
+# Pinned to v0.0.55 — has chat-with-* multi-tool support, 10MB bufio buffer, --config flag
+RUN git clone --branch v0.0.55 --depth 1 https://github.com/nanobot-ai/nanobot.git .
+# UI disabled so go generate not needed — .dist placeholder satisfies embed
 RUN go build -o nanobot .
 
 FROM alpine:latest
@@ -151,10 +153,22 @@ ENTRYPOINT ["./entrypoint.sh"]
 ```
 
 **Key details**:
+- Nanobot pinned to **v0.0.55** (see Version Notes below for why)
 - Production image includes `nodejs npm` for running MCP server subprocesses
 - Gmail and MS365 MCP packages are pre-installed globally
-- `entrypoint.sh` writes OAuth credential files from env vars before starting nanobot
+- `entrypoint.sh` dynamically generates `nanobot.yaml` based on available credentials
 - `--disable-ui` flag prevents nanobot from starting its built-in web UI
+- `--config ./nanobot.yaml` must use `./` prefix (required since v0.0.51)
+
+**Nanobot Version Notes**:
+| Version | Tool Name | `--config` | Bufio Buffer | Built-in Agents | Notes |
+|---------|-----------|------------|--------------|-----------------|-------|
+| v0.0.50 | `chat` (single tool) | Not supported | 64KB default | None | Too old — only 1 tool |
+| v0.0.51+ | `chat-with-assistant` | Supported | 10MB | executor, explorer, planner | Multi-tool support |
+| v0.0.53 | `chat-with-assistant` | Supported | 10MB | + explorer agent added | Added MCP server search |
+| v0.0.55 | `chat-with-assistant` | Supported | 10MB | executor, general-chat, planner | **Current — stable** |
+
+The app dynamically discovers tool names via `tools/list` and uses `availableTools[0]` so it works with any version.
 
 **Railway Configuration** (`backend/railway.toml`):
 ```toml
@@ -168,23 +182,24 @@ restartPolicyMaxRetries = 3
 ```
 
 **Nanobot Agent Configuration** (`backend/nanobot.yaml`):
+
+Note: The static `nanobot.yaml` in the repo contains the full config, but at runtime `entrypoint.sh` **dynamically regenerates** it based on which OAuth credentials are set. If Gmail creds are missing, the gmail MCP server is excluded (preventing startup crashes). Same for MS365.
+
 ```yaml
+# This is the STATIC config — entrypoint.sh overwrites it at runtime
 agents:
   assistant:
     model: gpt-4o
     instructions: |
       You are a helpful AI assistant with access to powerful tools.
-      You can search the web, read URLs, think step by step, and look up GitHub docs.
-      You can access the user's Gmail, Outlook email, and OneDrive files.
-      When asked about emails, use the appropriate Gmail or Outlook tools.
-      When asked about files or documents in their cloud storage, use OneDrive tools.
+      ...
     mcpServers:
       - search
       - fetch
       - thinking
       - deepwiki
-      - gmail
-      - microsoft365
+      - gmail        # Only included if GMAIL_OAUTH_KEYS_JSON is set
+      - microsoft365  # Only included if MS365_MCP_CLIENT_ID is set
 
 mcpServers:
   search:
@@ -203,9 +218,14 @@ mcpServers:
     args: ["-y", "@softeria/ms-365-mcp-server"]
 ```
 
+**Dynamic config generation** (`entrypoint.sh`):
+- Checks `GMAIL_OAUTH_KEYS_JSON` + `GMAIL_CREDENTIALS_JSON` — if both set, writes creds to `/root/.gmail-mcp/` and includes gmail MCP server
+- Checks `MS365_MCP_CLIENT_ID` + `MS365_MCP_CLIENT_SECRET` — if both set, includes microsoft365 MCP server
+- Generates `nanobot.yaml` with only the available servers, preventing "failed to build tool mappings" crashes
+
 ### MCP Servers
 
-The assistant has access to 6 MCP servers — 4 remote (URL-based) and 2 local (stdio subprocesses):
+The assistant has access to up to 6 MCP servers — 4 remote (URL-based, always available) and 2 local (stdio subprocesses, require OAuth credentials):
 
 | Server | Type | What it does |
 |--------|------|--------------|
@@ -567,10 +587,16 @@ const response = await fetch(`${serverUrl}/mcp/ui`, {
 
 ### Available Tools
 
-The nanobot configuration exposes:
-- `chat-with-assistant` - Main chat tool with `prompt` argument and optional `attachments` array for multimodal image input
+Nanobot v0.0.55 exposes multiple tools via the `tools/list` MCP method. Each agent becomes a `chat-with-<name>` tool:
 
-The assistant agent also has access to tools provided by the 4 remote MCP servers (search, fetch, sequential thinking, DeepWiki). These tools are invoked server-side by the AI model — the mobile app only calls `chat-with-assistant` and the backend handles tool orchestration.
+| Tool | Source | Description |
+|------|--------|-------------|
+| `chat-with-assistant` | User config (`nanobot.yaml`) | Main chat tool with `prompt` + optional `attachments` |
+| `chat-with-executor` | Built-in agent | Task execution agent |
+| `chat-with-general-chat` | Built-in agent (explorer) | MCP server discovery + general chat |
+| `chat-with-planner` | Built-in agent | Planning and step-by-step reasoning |
+
+The mobile app dynamically discovers tool names via `tools/list` and uses `availableTools[0]` (which is `chat-with-assistant`) to send messages. The assistant agent also has access to tools provided by the MCP servers (search, fetch, sequential thinking, DeepWiki, Gmail, MS365). These tools are invoked server-side by the AI model — the mobile app only calls `chat-with-assistant` and the backend handles tool orchestration.
 
 ### Image Attachment Pipeline
 
@@ -823,6 +849,30 @@ agents:
 1. Removed `base64: true` from ImagePicker options — pick only returns a URI
 2. Moved base64 conversion to send time using `FileSystem.readAsStringAsync()` with try/catch
 3. Lowered image quality from 0.8 to 0.4 to reduce base64 payload size
+
+### 12. MCP Server Startup Crash (Missing Credentials)
+
+**Error**: `failed to add tools: failed to build tool mappings: no result in response`
+
+**Cause**: Gmail or MS365 MCP servers listed in `nanobot.yaml` but their OAuth credentials not set in Railway env vars. When nanobot tries to start a stdio MCP server that immediately fails, the entire server crashes.
+
+**Solution**: `entrypoint.sh` dynamically generates `nanobot.yaml` at startup, only including MCP servers whose credentials are present. Gmail is included only if both `GMAIL_OAUTH_KEYS_JSON` and `GMAIL_CREDENTIALS_JSON` are set. MS365 only if `MS365_MCP_CLIENT_ID` and `MS365_MCP_CLIENT_SECRET` are set.
+
+### 13. Nanobot Version Compatibility
+
+**Error**: Various — `unknown flag: --config` (v0.0.50), `bufio.Scanner: token too long` (transient), tool name `chat` vs `chat-with-assistant`
+
+**Cause**: v0.0.50 (Jan 2026) uses a single `chat` tool and doesn't support `--config`. v0.0.51+ changed to `chat-with-<agent>` naming and added `--config` flag with `./` prefix requirement.
+
+**Solution**: Pinned to v0.0.55 which has all required features. Mobile app uses `availableTools[0]` for dynamic tool name discovery instead of hardcoding.
+
+### 14. Tool Name Mismatch Between Versions
+
+**Error**: `tool chat-with-assistant not found` (on v0.0.50) or `tool chat not found` (on v0.0.51+)
+
+**Cause**: Nanobot renamed the chat tool from `chat` to `chat-with-<agentname>` in v0.0.51.
+
+**Solution**: Mobile app calls `tools/list` on connect and stores tool names in `availableTools` state. When sending messages, uses `availableTools[0] || 'chat'` instead of a hardcoded name. Works with any nanobot version.
 
 ---
 
