@@ -5,10 +5,10 @@ RUN apk add --no-cache git nodejs npm
 
 WORKDIR /app
 
-# Clone nanobot (pinned to v0.0.50 for stability)
-RUN git clone --branch v0.0.50 --depth 1 https://github.com/nanobot-ai/nanobot.git .
+# Clone nanobot (pinned to v0.0.55 — has chat-with-* tools, 10MB bufio, --config flag)
+RUN git clone --branch v0.0.55 --depth 1 https://github.com/nanobot-ai/nanobot.git .
 
-# Build Go binary
+# Build Go binary (UI disabled so go generate not needed — .dist placeholder satisfies embed)
 RUN go build -o nanobot .
 
 # Production image
