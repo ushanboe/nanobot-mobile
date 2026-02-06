@@ -1,288 +1,326 @@
-// Main chat screen
-import React, { useState, useRef, useEffect } from 'react';
-import {
-  View,
-  FlatList,
-  StyleSheet,
-  useColorScheme,
-  TouchableOpacity,
-  Text,
-  Modal,
-  KeyboardAvoidingView,
-  Platform,
-} from 'react-native';
+// Main chat screen with proper nanobot integration
+import React, { useState, useRef } from 'react';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator } from 'react-native';
 import { useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Message } from '@/components/Message';
-import { ChatInput } from '@/components/ChatInput';
-import { ThreadList } from '@/components/ThreadList';
-import { useChatStore } from '@/store/chatStore';
-import { Colors, Spacing, FontSizes } from '@/constants/theme';
-import type { Message as MessageType } from '@/types/mcp';
 
 export default function ChatScreen() {
   const router = useRouter();
-  const insets = useSafeAreaInsets();
-  const colorScheme = useColorScheme();
-  const colors = Colors[colorScheme === 'dark' ? 'dark' : 'light'];
-  const flatListRef = useRef<FlatList>(null);
-  const [showThreads, setShowThreads] = useState(false);
+  const [serverUrl, setServerUrl] = useState('');
+  const [isConnected, setIsConnected] = useState(false);
+  const [sessionId, setSessionId] = useState('');
+  const [message, setMessage] = useState('');
+  const [messages, setMessages] = useState<Array<{role: string, text: string}>>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const scrollViewRef = useRef<ScrollView>(null);
 
-  const {
-    isConnected,
-    isConnecting,
-    connectionError,
-    serverUrl,
-    messages,
-    isSending,
-    currentThreadId,
-    agents,
-    currentAgentId,
-    selectThread,
-    selectAgent,
-    sendMessage,
-    loadThreads,
-  } = useChatStore();
-
-  // Scroll to bottom when new messages arrive
-  useEffect(() => {
-    if (messages.length > 0) {
-      setTimeout(() => {
-        flatListRef.current?.scrollToEnd({ animated: true });
-      }, 100);
+  const handleConnect = async () => {
+    if (!serverUrl) {
+      alert('Please enter a server URL');
+      return;
     }
-  }, [messages]);
 
-  const handleSend = (text: string, attachments?: Array<{ type: string; data: string; mimeType: string }>) => {
-    sendMessage(text, attachments);
+    setIsLoading(true);
+    try {
+      // Initialize MCP connection
+      const response = await fetch(`${serverUrl}/mcp/ui`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: '1',
+          method: 'initialize',
+          params: {
+            protocolVersion: '2024-11-05',
+            capabilities: {},
+            clientInfo: { name: 'nanobot-mobile', version: '1.0.0' }
+          }
+        })
+      });
+
+      const newSessionId = response.headers.get('Mcp-Session-Id');
+      if (newSessionId) {
+        setSessionId(newSessionId);
+      }
+
+      // List available tools
+      const toolsResponse = await fetch(`${serverUrl}/mcp/ui`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(newSessionId && { 'Mcp-Session-Id': newSessionId })
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: '2',
+          method: 'tools/list',
+          params: {}
+        })
+      });
+      const toolsData = await toolsResponse.json();
+      const toolNames = toolsData.result?.tools?.map((t: any) => t.name).join(', ') || 'none';
+
+      setIsConnected(true);
+      setMessages([{ role: 'assistant', text: `Connected! Available tools: ${toolNames}` }]);
+    } catch (error) {
+      alert(`Connection failed: ${error}`);
+    }
+    setIsLoading(false);
   };
 
-  const handleSelectThread = (threadId: string) => {
-    selectThread(threadId);
+  const handleSend = async () => {
+    if (!message.trim() || isLoading) return;
+
+    const userMessage = message.trim();
+    setMessages(prev => [...prev, { role: 'user', text: userMessage }]);
+    setMessage('');
+    setIsLoading(true);
+
+    setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: true }), 100);
+
+    try {
+      // Call the 'chat-with-assistant' tool
+      const response = await fetch(`${serverUrl}/mcp/ui`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(sessionId && { 'Mcp-Session-Id': sessionId })
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: Date.now().toString(),
+          method: 'tools/call',
+          params: {
+            name: 'chat-with-assistant',
+            arguments: {
+              prompt: userMessage
+            }
+          }
+        })
+      });
+
+      const newSessionId = response.headers.get('Mcp-Session-Id');
+      if (newSessionId) {
+        setSessionId(newSessionId);
+      }
+
+      const data = await response.json();
+
+      // Extract the response text
+      let responseText = 'No response';
+      if (data.result?.content) {
+        for (const item of data.result.content) {
+          if (item.type === 'text' && item.text) {
+            responseText = item.text;
+            break;
+          }
+        }
+      } else if (data.error) {
+        responseText = `Error: ${data.error.message}`;
+      }
+
+      setMessages(prev => [...prev, { role: 'assistant', text: responseText }]);
+    } catch (error) {
+      setMessages(prev => [...prev, { role: 'assistant', text: `Error: ${error}` }]);
+    }
+
+    setIsLoading(false);
+    setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: true }), 100);
   };
 
-  // Not connected state
-  if (!serverUrl) {
+  if (!isConnected) {
     return (
-      <View style={[styles.centerContainer, { backgroundColor: colors.background }]}>
-        <Ionicons name="cloud-offline-outline" size={64} color={colors.textSecondary} />
-        <Text style={[styles.statusTitle, { color: colors.text }]}>Not Connected</Text>
-        <Text style={[styles.statusText, { color: colors.textSecondary }]}>
-          Configure your Nanobot server to get started
-        </Text>
+      <View style={styles.container}>
+        <Text style={styles.title}>Nanobot Mobile</Text>
+        <Text style={styles.subtitle}>Connect to your server</Text>
+        <TextInput
+          style={styles.input}
+          placeholder="https://nanobot-mobile-production.up.railway.app"
+          placeholderTextColor="#666"
+          value={serverUrl}
+          onChangeText={setServerUrl}
+          autoCapitalize="none"
+        />
         <TouchableOpacity
-          style={[styles.primaryButton, { backgroundColor: colors.primary }]}
-          onPress={() => router.push('/settings')}
+          style={[styles.button, isLoading && styles.buttonDisabled]}
+          onPress={handleConnect}
+          disabled={isLoading}
         >
-          <Text style={styles.primaryButtonText}>Open Settings</Text>
+          {isLoading ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={styles.buttonText}>Connect</Text>
+          )}
         </TouchableOpacity>
       </View>
     );
   }
-
-  // Connecting state
-  if (isConnecting) {
-    return (
-      <View style={[styles.centerContainer, { backgroundColor: colors.background }]}>
-        <Ionicons name="sync-outline" size={64} color={colors.primary} />
-        <Text style={[styles.statusTitle, { color: colors.text }]}>Connecting...</Text>
-        <Text style={[styles.statusText, { color: colors.textSecondary }]}>{serverUrl}</Text>
-      </View>
-    );
-  }
-
-  // Connection error state
-  if (connectionError) {
-    return (
-      <View style={[styles.centerContainer, { backgroundColor: colors.background }]}>
-        <Ionicons name="alert-circle-outline" size={64} color={colors.error} />
-        <Text style={[styles.statusTitle, { color: colors.text }]}>Connection Failed</Text>
-        <Text style={[styles.statusText, { color: colors.textSecondary }]}>{connectionError}</Text>
-        <TouchableOpacity
-          style={[styles.primaryButton, { backgroundColor: colors.primary }]}
-          onPress={() => useChatStore.getState().connect()}
-        >
-          <Text style={styles.primaryButtonText}>Retry</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.secondaryButton, { borderColor: colors.border }]}
-          onPress={() => router.push('/settings')}
-        >
-          <Text style={[styles.secondaryButtonText, { color: colors.text }]}>Settings</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
-
-  const currentAgent = agents.find((a) => a.id === currentAgentId);
 
   return (
-    <KeyboardAvoidingView
-      style={[styles.container, { backgroundColor: colors.background }]}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
-    >
-      {/* Header bar with thread/agent selectors */}
-      <View style={[styles.headerBar, { borderBottomColor: colors.border }]}>
-        <TouchableOpacity
-          style={styles.headerButton}
-          onPress={() => setShowThreads(true)}
-        >
-          <Ionicons name="menu-outline" size={24} color={colors.text} />
-        </TouchableOpacity>
-
-        {/* Agent selector */}
-        {agents.length > 1 && (
-          <TouchableOpacity
-            style={[styles.agentSelector, { backgroundColor: colors.surface }]}
-          >
-            <Text style={[styles.agentName, { color: colors.text }]} numberOfLines={1}>
-              {currentAgent?.name || 'Select Agent'}
-            </Text>
-            <Ionicons name="chevron-down" size={16} color={colors.textSecondary} />
-          </TouchableOpacity>
-        )}
-
-        <TouchableOpacity
-          style={styles.headerButton}
-          onPress={() => router.push('/settings')}
-        >
-          <Ionicons name="settings-outline" size={24} color={colors.text} />
+    <View style={styles.container}>
+      <View style={styles.header}>
+        <Text style={styles.headerText}>Connected</Text>
+        <TouchableOpacity onPress={() => { setIsConnected(false); setMessages([]); setSessionId(''); }}>
+          <Text style={styles.disconnectText}>Disconnect</Text>
         </TouchableOpacity>
       </View>
 
-      {/* Messages list */}
-      <FlatList
-        ref={flatListRef}
-        data={messages}
-        renderItem={({ item }) => <Message message={item} />}
-        keyExtractor={(item) => item.id}
-        contentContainerStyle={[
-          styles.messageList,
-          { paddingBottom: Spacing.md },
-        ]}
-        ListEmptyComponent={
-          <View style={styles.emptyChat}>
-            <Ionicons name="chatbubble-ellipses-outline" size={64} color={colors.textSecondary} />
-            <Text style={[styles.emptyChatText, { color: colors.textSecondary }]}>
-              Start a conversation
-            </Text>
-            {currentAgent && (
-              <Text style={[styles.emptyChatAgent, { color: colors.primary }]}>
-                with {currentAgent.name}
-              </Text>
-            )}
-          </View>
-        }
-      />
-
-      {/* Input */}
-      <ChatInput
-        onSend={handleSend}
-        disabled={!isConnected}
-        isSending={isSending}
-      />
-
-      {/* Thread list modal */}
-      <Modal
-        visible={showThreads}
-        animationType="slide"
-        presentationStyle="pageSheet"
-        onRequestClose={() => setShowThreads(false)}
+      <ScrollView
+        ref={scrollViewRef}
+        style={styles.messagesContainer}
+        contentContainerStyle={styles.messagesContent}
       >
-        <ThreadList
-          onSelectThread={handleSelectThread}
-          onClose={() => setShowThreads(false)}
+        {messages.map((msg, i) => (
+          <View key={i} style={[styles.message, msg.role === 'user' ? styles.userMessage : styles.assistantMessage]}>
+            <Text style={styles.messageText}>{msg.text}</Text>
+          </View>
+        ))}
+        {isLoading && (
+          <View style={[styles.message, styles.assistantMessage]}>
+            <ActivityIndicator color="#6366f1" size="small" />
+          </View>
+        )}
+      </ScrollView>
+
+      <View style={styles.inputContainer}>
+        <TextInput
+          style={styles.chatInput}
+          placeholder="Type a message..."
+          placeholderTextColor="#666"
+          value={message}
+          onChangeText={setMessage}
+          onSubmitEditing={handleSend}
+          editable={!isLoading}
         />
-      </Modal>
-    </KeyboardAvoidingView>
+        <TouchableOpacity
+          style={[styles.sendButton, (!message.trim() || isLoading) && styles.sendButtonDisabled]}
+          onPress={handleSend}
+          disabled={!message.trim() || isLoading}
+        >
+          <Text style={styles.sendButtonText}>Send</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: '#1a1a2e',
   },
-  centerContainer: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: Spacing.xl,
-  },
-  statusTitle: {
-    fontSize: FontSizes.xl,
-    fontWeight: '600',
-    marginTop: Spacing.md,
-  },
-  statusText: {
-    fontSize: FontSizes.md,
-    textAlign: 'center',
-    marginTop: Spacing.sm,
-  },
-  primaryButton: {
-    paddingHorizontal: Spacing.xl,
-    paddingVertical: Spacing.md,
-    borderRadius: 8,
-    marginTop: Spacing.lg,
-  },
-  primaryButtonText: {
+  title: {
+    fontSize: 28,
+    fontWeight: 'bold',
     color: '#fff',
-    fontSize: FontSizes.md,
+    textAlign: 'center',
+    marginTop: 100,
+  },
+  subtitle: {
+    fontSize: 16,
+    color: '#888',
+    textAlign: 'center',
+    marginTop: 10,
+    marginBottom: 30,
+  },
+  input: {
+    backgroundColor: '#2a2a4e',
+    color: '#fff',
+    padding: 15,
+    marginHorizontal: 20,
+    borderRadius: 10,
+    fontSize: 16,
+  },
+  button: {
+    backgroundColor: '#6366f1',
+    padding: 15,
+    marginHorizontal: 20,
+    marginTop: 20,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  buttonDisabled: {
+    opacity: 0.7,
+  },
+  buttonText: {
+    color: '#fff',
+    fontSize: 16,
     fontWeight: '600',
   },
-  secondaryButton: {
-    paddingHorizontal: Spacing.xl,
-    paddingVertical: Spacing.md,
-    borderRadius: 8,
-    marginTop: Spacing.md,
-    borderWidth: 1,
-  },
-  secondaryButtonText: {
-    fontSize: FontSizes.md,
-    fontWeight: '500',
-  },
-  headerBar: {
+  header: {
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: Spacing.sm,
-    paddingVertical: Spacing.sm,
+    alignItems: 'center',
+    padding: 15,
     borderBottomWidth: 1,
+    borderBottomColor: '#333',
   },
-  headerButton: {
-    padding: Spacing.sm,
-  },
-  agentSelector: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
-    borderRadius: 20,
-    gap: Spacing.xs,
-    maxWidth: 200,
-  },
-  agentName: {
-    fontSize: FontSizes.sm,
+  headerText: {
+    color: '#4ade80',
+    fontSize: 14,
     fontWeight: '500',
   },
-  messageList: {
-    flexGrow: 1,
-    paddingTop: Spacing.md,
+  disconnectText: {
+    color: '#f87171',
+    fontSize: 14,
   },
-  emptyChat: {
+  messagesContainer: {
     flex: 1,
+  },
+  messagesContent: {
+    padding: 15,
+    paddingBottom: 20,
+  },
+  message: {
+    padding: 12,
+    borderRadius: 16,
+    marginBottom: 10,
+    maxWidth: '85%',
+  },
+  userMessage: {
+    backgroundColor: '#6366f1',
+    alignSelf: 'flex-end',
+    borderBottomRightRadius: 4,
+  },
+  assistantMessage: {
+    backgroundColor: '#2a2a4e',
+    alignSelf: 'flex-start',
+    borderBottomLeftRadius: 4,
+  },
+  messageText: {
+    color: '#fff',
+    fontSize: 15,
+    lineHeight: 22,
+  },
+  inputContainer: {
+    flexDirection: 'row',
+    padding: 15,
+    borderTopWidth: 1,
+    borderTopColor: '#333',
     alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: Spacing.xl * 4,
   },
-  emptyChatText: {
-    fontSize: FontSizes.lg,
-    marginTop: Spacing.md,
+  chatInput: {
+    flex: 1,
+    backgroundColor: '#2a2a4e',
+    color: '#fff',
+    padding: 12,
+    paddingHorizontal: 16,
+    borderRadius: 24,
+    fontSize: 15,
+    maxHeight: 100,
   },
-  emptyChatAgent: {
-    fontSize: FontSizes.md,
-    fontWeight: '500',
-    marginTop: Spacing.xs,
+  sendButton: {
+    backgroundColor: '#6366f1',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 24,
+    marginLeft: 10,
+  },
+  sendButtonDisabled: {
+    opacity: 0.5,
+  },
+  sendButtonText: {
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: 15,
   },
 });

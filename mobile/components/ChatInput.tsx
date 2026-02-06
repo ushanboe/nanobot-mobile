@@ -75,11 +75,11 @@ export function ChatInput({ onSend, disabled, isSending }: Props) {
       setAttachments((prev) => [
         ...prev,
         {
-          type: 'image',
+          type: 'image' as const,
           uri: asset.uri,
           name: asset.fileName || 'image.jpg',
           mimeType: asset.mimeType || 'image/jpeg',
-          base64: asset.base64,
+          base64: asset.base64 ?? undefined,
         },
       ]);
     }
@@ -102,11 +102,11 @@ export function ChatInput({ onSend, disabled, isSending }: Props) {
       setAttachments((prev) => [
         ...prev,
         {
-          type: 'image',
+          type: 'image' as const,
           uri: asset.uri,
           name: 'photo.jpg',
           mimeType: 'image/jpeg',
-          base64: asset.base64,
+          base64: asset.base64 ?? undefined,
         },
       ]);
     }
