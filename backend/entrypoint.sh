@@ -120,19 +120,13 @@ if [ "$MS365_READY" = true ]; then
       When asked about files or documents in their cloud storage, use OneDrive tools to search and retrieve them."
   EXTRA_AGENT_SERVERS="${EXTRA_AGENT_SERVERS}
       - microsoft365"
-  # Use resolved entry point (node <path>) instead of npx to ensure import.meta.url
-  # matches the directory where we pre-seeded the token cache
-  if [ -n "$MS365_ENTRY" ]; then
-    EXTRA_MCP_SERVERS="${EXTRA_MCP_SERVERS}
+  # Use ms365-wrapper.mjs which writes token cache from env vars in the SAME process
+  # that resolves the package, then imports and runs the server. This guarantees the
+  # cache file is at the exact path the server's auth.js expects (via import.meta.url).
+  EXTRA_MCP_SERVERS="${EXTRA_MCP_SERVERS}
   microsoft365:
     command: node
-    args: [\"$MS365_ENTRY\"]"
-  else
-    EXTRA_MCP_SERVERS="${EXTRA_MCP_SERVERS}
-  microsoft365:
-    command: npx
-    args: [\"-y\", \"@softeria/ms-365-mcp-server\"]"
-  fi
+    args: [\"/app/ms365-wrapper.mjs\"]"
 fi
 
 if [ "$GMAIL_READY" = true ] && [ "$MS365_READY" = true ]; then

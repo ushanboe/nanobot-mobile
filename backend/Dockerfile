@@ -25,9 +25,10 @@ WORKDIR /app
 
 COPY --from=builder /app/nanobot .
 
-# Copy config and entrypoint
+# Copy config, entrypoint, and wrapper scripts
 COPY nanobot.yaml .
 COPY entrypoint.sh .
+COPY ms365-wrapper.mjs .
 RUN chmod +x entrypoint.sh
 
 # Pre-install MCP server packages globally
