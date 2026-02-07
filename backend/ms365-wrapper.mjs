@@ -14,6 +14,7 @@
 import fs from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
+import { createRequire } from 'module';
 
 const configPath = '/app/ms365-config.json';
 const diagPath = '/tmp/ms365-wrapper-diag.txt';
@@ -361,8 +362,11 @@ const originalInitialize = MicrosoftGraphServer.prototype.initialize;
 MicrosoftGraphServer.prototype.initialize = async function (version) {
   await originalInitialize.call(this, version);
 
-  // Import zod for parameter schema
-  const { z } = await import('zod');
+  // Resolve zod from the server's location (zod is installed as its dependency).
+  // Can't use import('zod') because NODE_PATH isn't set at Node startup
+  // (nanobot doesn't pass env vars to child processes).
+  const serverRequire = createRequire(pathToFileURL(path.join(pkgRoot, 'dist', 'index.js')).href);
+  const { z } = serverRequire('zod');
 
   this.server.tool(
     'search-onedrive-files',
