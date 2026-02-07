@@ -79,6 +79,20 @@ if [ -n "$MS365_MCP_CLIENT_ID" ] && [ -n "$MS365_MCP_CLIENT_SECRET" ]; then
     echo "  Note: No MS365_TOKEN_CACHE_JSON set - user must complete device code login"
   fi
 
+  # Write wrapper config file — nanobot doesn't pass env vars to child processes,
+  # so the wrapper reads credentials from this file instead.
+  node -e "
+    const fs = require('fs');
+    fs.writeFileSync('/app/ms365-config.json', JSON.stringify({
+      pkgRoot: process.env.MS365_PKG_ROOT,
+      clientId: process.env.MS365_MCP_CLIENT_ID,
+      clientSecret: process.env.MS365_MCP_CLIENT_SECRET || '',
+      tenantId: process.env.MS365_MCP_TENANT_ID || 'common',
+      nodePath: '$(npm root -g)',
+    }));
+    console.log('  Wrapper config written: /app/ms365-config.json');
+  "
+
   # Pre-seed selected account if provided
   if [ -n "$MS365_SELECTED_ACCOUNT_JSON" ]; then
     if [ -d "$MS365_PKG_ROOT" ]; then
@@ -120,20 +134,13 @@ if [ "$MS365_READY" = true ]; then
       When asked about files or documents in their cloud storage, use OneDrive tools to search and retrieve them."
   EXTRA_AGENT_SERVERS="${EXTRA_AGENT_SERVERS}
       - microsoft365"
-  # Use ms365-wrapper.mjs which acquires a fresh token and injects MS365_MCP_OAUTH_TOKEN.
-  # CRITICAL: nanobot does NOT pass parent env vars to child MCP servers.
-  # All required env vars must be passed explicitly via the env: field.
-  # Token cache is read from file (already written above) — not passed as env var
-  # (would cause YAML escaping issues with large JSON).
+  # Use ms365-wrapper.mjs which reads /app/ms365-config.json and token cache file,
+  # acquires a fresh access token, and injects it via MS365_MCP_OAUTH_TOKEN.
+  # All config is file-based because nanobot doesn't pass env vars to child processes.
   EXTRA_MCP_SERVERS="${EXTRA_MCP_SERVERS}
   microsoft365:
     command: node
-    args: [\"/app/ms365-wrapper.mjs\"]
-    env:
-      NODE_PATH: \"$(npm root -g)\"
-      MS365_PKG_ROOT: \"$MS365_PKG_ROOT\"
-      MS365_MCP_CLIENT_ID: \"$MS365_MCP_CLIENT_ID\"
-      MS365_MCP_TENANT_ID: \"${MS365_MCP_TENANT_ID:-common}\""
+    args: [\"/app/ms365-wrapper.mjs\"]"
 fi
 
 if [ "$GMAIL_READY" = true ] && [ "$MS365_READY" = true ]; then
