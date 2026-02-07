@@ -295,6 +295,32 @@ if (typeof AuthManager.prototype.testLogin === 'function') {
   log('Patched AuthManager.prototype.testLogin for OAuth mode');
 }
 
+// Patch GraphClient.prototype.makeRequest to filter /me/drives responses.
+// Personal Microsoft accounts return multiple drives including internal ones
+// (ODCMetadataArchive, Bundles) that return 400 errors when queried.
+// GPT-4o picks the first drive, which is often the broken ODCMetadataArchive.
+// This patch filters the response to only return the actual OneDrive.
+const graphModule = await import(pathToFileURL(path.join(pkgRoot, 'dist', 'graph-client.js')).href);
+const GraphClient = graphModule.default;
+const originalMakeRequest = GraphClient.prototype.makeRequest;
+GraphClient.prototype.makeRequest = async function (endpoint, options = {}) {
+  const result = await originalMakeRequest.call(this, endpoint, options);
+  if (endpoint === '/me/drives' && result && result.value && Array.isArray(result.value)) {
+    const before = result.value.length;
+    const filtered = result.value.filter(drive =>
+      drive.driveType === 'personal' || drive.name === 'OneDrive'
+    );
+    if (filtered.length > 0) {
+      result.value = filtered;
+      log(`Filtered /me/drives: ${before} → ${filtered.length} (kept: ${filtered.map(d => d.name).join(', ')})`);
+    } else {
+      log(`WARNING: /me/drives filter found no personal drives, returning all ${before}`);
+    }
+  }
+  return result;
+};
+log('Patched GraphClient.prototype.makeRequest to filter /me/drives');
+
 // Import and run the actual server
 log(`Starting server... (MS365_MCP_OAUTH_TOKEN set: ${!!process.env.MS365_MCP_OAUTH_TOKEN})`);
 await import(pathToFileURL(serverEntry).href);
