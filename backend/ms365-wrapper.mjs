@@ -17,12 +17,28 @@ const pkgRoot = process.env.MS365_PKG_ROOT || '/usr/local/lib/node_modules/@soft
 const serverEntry = path.join(pkgRoot, 'dist', 'index.js');
 const cachePath = path.join(pkgRoot, '.token-cache.json');
 const accountPath = path.join(pkgRoot, '.selected-account.json');
+const diagPath = '/tmp/ms365-wrapper-diag.txt';
 
-console.error(`[ms365-wrapper] Package root: ${pkgRoot}`);
-console.error(`[ms365-wrapper] Server entry: ${serverEntry}`);
+// Log to both stderr and a diagnostic file the AI can read
+const diagLog = [];
+function log(msg) {
+  const line = `[ms365-wrapper] ${msg}`;
+  console.error(line);
+  diagLog.push(line);
+  fs.writeFileSync(diagPath, diagLog.join('\n') + '\n');
+}
+
+log(`Package root: ${pkgRoot}`);
+log(`Server entry: ${serverEntry}`);
+log(`NODE_PATH: ${process.env.NODE_PATH || '(not set)'}`);
+log(`MS365_TOKEN_CACHE_JSON set: ${!!process.env.MS365_TOKEN_CACHE_JSON}`);
+log(`MS365_TOKEN_CACHE_JSON length: ${(process.env.MS365_TOKEN_CACHE_JSON || '').length}`);
+log(`MS365_MCP_CLIENT_ID set: ${!!process.env.MS365_MCP_CLIENT_ID}`);
+log(`MS365_MCP_TENANT_ID: ${process.env.MS365_MCP_TENANT_ID || '(not set)'}`);
+log(`MS365_SELECTED_ACCOUNT_JSON set: ${!!process.env.MS365_SELECTED_ACCOUNT_JSON}`);
 
 if (!fs.existsSync(serverEntry)) {
-  console.error(`[ms365-wrapper] ERROR: Server entry not found at ${serverEntry}`);
+  log(` ERROR: Server entry not found at ${serverEntry}`);
   process.exit(1);
 }
 
@@ -30,7 +46,7 @@ if (!fs.existsSync(serverEntry)) {
 if (process.env.MS365_TOKEN_CACHE_JSON) {
   fs.writeFileSync(cachePath, process.env.MS365_TOKEN_CACHE_JSON);
   fs.chmodSync(cachePath, 0o600);
-  console.error(`[ms365-wrapper] Token cache written: ${fs.statSync(cachePath).size} bytes`);
+  log(` Token cache written: ${fs.statSync(cachePath).size} bytes`);
 }
 if (process.env.MS365_SELECTED_ACCOUNT_JSON) {
   try {
@@ -38,9 +54,9 @@ if (process.env.MS365_SELECTED_ACCOUNT_JSON) {
     const formatted = JSON.stringify({ accountId: d.accountId || d.homeAccountId });
     fs.writeFileSync(accountPath, formatted);
     fs.chmodSync(accountPath, 0o600);
-    console.error(`[ms365-wrapper] Selected account: ${formatted}`);
+    log(` Selected account: ${formatted}`);
   } catch (e) {
-    console.error(`[ms365-wrapper] Selected account write failed: ${e.message}`);
+    log(` Selected account write failed: ${e.message}`);
   }
 }
 
@@ -97,13 +113,13 @@ if (process.env.MS365_TOKEN_CACHE_JSON && clientId) {
   const refreshToken = extractRefreshToken(process.env.MS365_TOKEN_CACHE_JSON, clientId);
 
   if (refreshToken) {
-    console.error(`[ms365-wrapper] Found refresh token (${refreshToken.length} chars)`);
+    log(` Found refresh token (${refreshToken.length} chars)`);
 
     try {
       const result = await refreshAccessToken(refreshToken, clientId, tenantId, scopes);
       process.env.MS365_MCP_OAUTH_TOKEN = result.access_token;
       currentRefreshToken = result.refresh_token || refreshToken;
-      console.error(`[ms365-wrapper] Got access token (${result.access_token.length} chars), expires_in: ${result.expires_in}s`);
+      log(` Got access token (${result.access_token.length} chars), expires_in: ${result.expires_in}s`);
 
       // Schedule token refresh every 45 minutes
       setInterval(async () => {
@@ -111,34 +127,34 @@ if (process.env.MS365_TOKEN_CACHE_JSON && clientId) {
           const r = await refreshAccessToken(currentRefreshToken, clientId, tenantId, scopes);
           process.env.MS365_MCP_OAUTH_TOKEN = r.access_token;
           currentRefreshToken = r.refresh_token || currentRefreshToken;
-          console.error(`[ms365-wrapper] Token refreshed, expires_in: ${r.expires_in}s`);
+          log(` Token refreshed, expires_in: ${r.expires_in}s`);
         } catch (e) {
-          console.error(`[ms365-wrapper] Token refresh failed: ${e.message}`);
+          log(` Token refresh failed: ${e.message}`);
         }
       }, 45 * 60 * 1000);
     } catch (e) {
-      console.error(`[ms365-wrapper] Token acquisition failed: ${e.message}`);
-      console.error(`[ms365-wrapper] Will fall back to server's own auth flow`);
+      log(` Token acquisition failed: ${e.message}`);
+      log(` Will fall back to server's own auth flow`);
     }
   } else {
-    console.error(`[ms365-wrapper] No refresh token found in cache`);
-    console.error(`[ms365-wrapper] Cache env var length: ${process.env.MS365_TOKEN_CACHE_JSON.length}`);
+    log(` No refresh token found in cache`);
+    log(` Cache env var length: ${process.env.MS365_TOKEN_CACHE_JSON.length}`);
     try {
       const parsed = JSON.parse(process.env.MS365_TOKEN_CACHE_JSON);
-      console.error(`[ms365-wrapper] Cache keys: ${Object.keys(parsed).join(', ')}`);
+      log(` Cache keys: ${Object.keys(parsed).join(', ')}`);
       const rt = parsed.RefreshToken || {};
-      console.error(`[ms365-wrapper] RefreshToken entries: ${Object.keys(rt).length}`);
+      log(` RefreshToken entries: ${Object.keys(rt).length}`);
       for (const [k, v] of Object.entries(rt)) {
-        console.error(`[ms365-wrapper]   Key: ${k}, has secret: ${!!v.secret}, client_id: ${v.client_id}`);
+        log(`   Key: ${k}, has secret: ${!!v.secret}, client_id: ${v.client_id}`);
       }
     } catch (e) {
-      console.error(`[ms365-wrapper] Cache parse failed: ${e.message}`);
+      log(` Cache parse failed: ${e.message}`);
     }
   }
 } else {
-  console.error(`[ms365-wrapper] Skipping token pre-acquisition (cache: ${!!process.env.MS365_TOKEN_CACHE_JSON}, clientId: ${!!clientId})`);
+  log(` Skipping token pre-acquisition (cache: ${!!process.env.MS365_TOKEN_CACHE_JSON}, clientId: ${!!clientId})`);
 }
 
 // Import and run the actual server
-console.error(`[ms365-wrapper] Starting server...`);
+log(`Starting server...`);
 await import(pathToFileURL(serverEntry).href);
