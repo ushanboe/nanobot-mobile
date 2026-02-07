@@ -81,6 +81,65 @@ if [ -n "$MS365_MCP_CLIENT_ID" ] && [ -n "$MS365_MCP_CLIENT_SECRET" ]; then
 
   # Write wrapper config file — nanobot doesn't pass env vars to child processes,
   # so the wrapper reads credentials from this file instead.
+  # Also pre-acquire access token here (where all env vars are available)
+  # using the refresh token from the token cache.
+  MS365_ACCESS_TOKEN=""
+  if [ -n "$MS365_TOKEN_CACHE_JSON" ]; then
+    # Extract refresh token from cache
+    REFRESH_TOKEN=$(printf '%s' "$MS365_TOKEN_CACHE_JSON" | node -e "
+      const cache = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+      const tokens = cache.RefreshToken || {};
+      for (const val of Object.values(tokens)) {
+        if (val.secret) { process.stdout.write(val.secret); break; }
+      }
+    " 2>/dev/null)
+
+    if [ -n "$REFRESH_TOKEN" ]; then
+      RT_LEN=$(printf '%s' "$REFRESH_TOKEN" | wc -c)
+      echo "  Refresh token found ($RT_LEN chars)"
+
+      # Call Microsoft token endpoint to get fresh access token
+      SCOPES="User.Read Mail.Read Mail.Send Files.Read Files.ReadWrite offline_access"
+      TENANT="${MS365_MCP_TENANT_ID:-common}"
+      TOKEN_RESPONSE=$(curl -s -X POST \
+        "https://login.microsoftonline.com/$TENANT/oauth2/v2.0/token" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "grant_type=refresh_token&client_id=$MS365_MCP_CLIENT_ID&refresh_token=$REFRESH_TOKEN&scope=$SCOPES" 2>/dev/null)
+
+      MS365_ACCESS_TOKEN=$(printf '%s' "$TOKEN_RESPONSE" | node -e "
+        const d = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+        if (d.access_token) process.stdout.write(d.access_token);
+        else process.stderr.write('Token error: ' + (d.error_description || d.error || 'unknown'));
+      " 2>&1 1>/dev/null | head -1)
+
+      # Check if that was an error message or if we got the token
+      ACTUAL_TOKEN=$(printf '%s' "$TOKEN_RESPONSE" | node -e "
+        const d = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+        if (d.access_token) process.stdout.write(d.access_token);
+      " 2>/dev/null)
+
+      if [ -n "$ACTUAL_TOKEN" ]; then
+        AT_LEN=$(printf '%s' "$ACTUAL_TOKEN" | wc -c)
+        MS365_ACCESS_TOKEN="$ACTUAL_TOKEN"
+        echo "  ACCESS TOKEN ACQUIRED ($AT_LEN chars)"
+      else
+        MS365_ACCESS_TOKEN=""
+        echo "  WARNING: Token acquisition failed"
+        printf '%s' "$TOKEN_RESPONSE" | head -c 200
+        echo ""
+      fi
+    else
+      echo "  WARNING: No refresh token in cache"
+    fi
+  fi
+
+  # Write access token to a separate file (too large/fragile for JSON embedding)
+  if [ -n "$MS365_ACCESS_TOKEN" ]; then
+    printf '%s' "$MS365_ACCESS_TOKEN" > /app/ms365-oauth-token.txt
+    chmod 600 /app/ms365-oauth-token.txt
+    echo "  OAuth token written to /app/ms365-oauth-token.txt"
+  fi
+
   node -e "
     const fs = require('fs');
     fs.writeFileSync('/app/ms365-config.json', JSON.stringify({
