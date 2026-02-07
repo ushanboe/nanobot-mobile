@@ -8,10 +8,17 @@
  * 5. Imports and runs the actual server
  *
  * Receives the package root via MS365_PKG_ROOT env var (set by entrypoint.sh).
+ *
+ * IMPORTANT: ESM import() does NOT respect NODE_PATH, so we use createRequire
+ * (CJS resolution) to load @azure/msal-node from global node_modules.
  */
 import fs from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
+import { createRequire } from 'module';
+
+// createRequire with NODE_PATH can resolve globally installed packages
+const require = createRequire(import.meta.url);
 
 const pkgRoot = process.env.MS365_PKG_ROOT || '/usr/local/lib/node_modules/@softeria/ms-365-mcp-server';
 const serverEntry = path.join(pkgRoot, 'dist', 'index.js');
@@ -20,6 +27,7 @@ const accountPath = path.join(pkgRoot, '.selected-account.json');
 
 console.error(`[ms365-wrapper] Package root: ${pkgRoot}`);
 console.error(`[ms365-wrapper] Server entry: ${serverEntry}`);
+console.error(`[ms365-wrapper] NODE_PATH: ${process.env.NODE_PATH || '(not set)'}`);
 
 if (!fs.existsSync(serverEntry)) {
   console.error(`[ms365-wrapper] ERROR: Server entry not found at ${serverEntry}`);
@@ -48,7 +56,20 @@ if (process.env.MS365_SELECTED_ACCOUNT_JSON) {
 // This bypasses the server's own loadTokenCache/getToken which may have issues
 if (process.env.MS365_TOKEN_CACHE_JSON && process.env.MS365_MCP_CLIENT_ID) {
   try {
-    const { PublicClientApplication } = await import('@azure/msal-node');
+    // Use createRequire (CJS) to load MSAL — ESM import() doesn't check NODE_PATH
+    let PublicClientApplication;
+    try {
+      ({ PublicClientApplication } = require('@azure/msal-node'));
+      console.error(`[ms365-wrapper] Loaded @azure/msal-node via CJS require`);
+    } catch (e1) {
+      console.error(`[ms365-wrapper] CJS require failed: ${e1.message}`);
+      // Fallback: try loading from the ms365 package's own node_modules
+      const msalDir = path.join(pkgRoot, 'node_modules', '@azure', 'msal-node');
+      console.error(`[ms365-wrapper] Trying fallback: ${msalDir}`);
+      ({ PublicClientApplication } = require(msalDir));
+      console.error(`[ms365-wrapper] Loaded @azure/msal-node from package node_modules`);
+    }
+
     const pca = new PublicClientApplication({
       auth: {
         clientId: process.env.MS365_MCP_CLIENT_ID,
@@ -77,7 +98,6 @@ if (process.env.MS365_TOKEN_CACHE_JSON && process.env.MS365_MCP_CLIENT_ID) {
       console.error(`[ms365-wrapper] Using account: ${account.username}`);
 
       // Use the same scopes that setup-ms365-token.js consented to
-      // (don't include offline_access — that's for getting refresh tokens, not a Graph scope)
       const scopes = ['User.Read', 'Mail.Read', 'Mail.Send', 'Files.Read', 'Files.ReadWrite'];
 
       try {
@@ -107,8 +127,7 @@ if (process.env.MS365_TOKEN_CACHE_JSON && process.env.MS365_MCP_CLIENT_ID) {
         console.error(`[ms365-wrapper] Will fall back to server's own auth flow`);
       }
     } else {
-      console.error(`[ms365-wrapper] No accounts in cache — token may be from incompatible MSAL version`);
-      // Log cache structure for debugging
+      console.error(`[ms365-wrapper] No accounts in cache — checking cache structure:`);
       try {
         const parsed = JSON.parse(cacheData);
         console.error(`[ms365-wrapper] Cache keys: ${Object.keys(parsed).join(', ')}`);
@@ -121,6 +140,7 @@ if (process.env.MS365_TOKEN_CACHE_JSON && process.env.MS365_MCP_CLIENT_ID) {
     }
   } catch (e) {
     console.error(`[ms365-wrapper] Token pre-acquisition failed: ${e.message}`);
+    console.error(`[ms365-wrapper] Stack: ${e.stack}`);
   }
 }
 
