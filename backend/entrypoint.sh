@@ -40,20 +40,19 @@ if [ -n "$MS365_MCP_CLIENT_ID" ] && [ -n "$MS365_MCP_CLIENT_SECRET" ]; then
   MS365_READY=true
   echo "MS365 credentials configured (client_id and client_secret set)"
 
-  # Resolve the actual ms-365-mcp-server entry point and package root.
-  # CRITICAL: We must use `node <entry>` instead of `npx -y` to run the server,
-  # because npx may create a cached copy in a DIFFERENT directory. The server's
-  # auth.js uses import.meta.url to find .token-cache.json relative to its own
-  # location, so the pre-seeded cache must be in the same directory tree.
-  MS365_ENTRY=$(node -e "try{console.log(require.resolve('@softeria/ms-365-mcp-server'))}catch(e){}" 2>/dev/null)
-  if [ -n "$MS365_ENTRY" ]; then
-    # Entry is like .../dist/index.js → package root is parent of dist/
-    MS365_PKG_ROOT=$(node -e "const p=require('path');console.log(p.resolve(p.dirname(require.resolve('@softeria/ms-365-mcp-server')),'..'))" 2>/dev/null)
+  # Derive package root and entry point directly from npm root -g.
+  # We use `node <entry>` instead of `npx -y` to run the server, because npx
+  # may create a cached copy in a DIFFERENT directory. The server's auth.js
+  # uses import.meta.url to find .token-cache.json relative to its own location.
+  MS365_PKG_ROOT="$(npm root -g)/@softeria/ms-365-mcp-server"
+  if [ -f "$MS365_PKG_ROOT/dist/index.js" ]; then
+    MS365_ENTRY="$MS365_PKG_ROOT/dist/index.js"
     echo "  MS365 entry: $MS365_ENTRY"
-    echo "  MS365 package root (resolved): $MS365_PKG_ROOT"
   else
-    MS365_PKG_ROOT="$(npm root -g)/@softeria/ms-365-mcp-server"
-    echo "  WARNING: Could not resolve ms-365-mcp-server, falling back to npm root: $MS365_PKG_ROOT"
+    MS365_ENTRY=""
+    echo "  WARNING: ms-365-mcp-server entry not found at $MS365_PKG_ROOT/dist/index.js"
+    echo "  npm root -g: $(npm root -g)"
+    ls -la "$(npm root -g)/@softeria/" 2>/dev/null || echo "  @softeria not found in global modules"
   fi
   echo "  Package dir exists: $([ -d "$MS365_PKG_ROOT" ] && echo yes || echo no)"
   echo "  dist dir exists: $([ -d "$MS365_PKG_ROOT/dist" ] && echo yes || echo no)"
