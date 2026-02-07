@@ -370,7 +370,7 @@ MicrosoftGraphServer.prototype.initialize = async function (version) {
 
   this.server.tool(
     'search-onedrive-files',
-    'Search for files and folders on OneDrive by name or keyword. Searches recursively through ALL folders and subfolders in a single call. Use this instead of manually browsing through folders when looking for a specific file.',
+    'Search for files and folders on OneDrive by name or keyword. Searches recursively through ALL folders and subfolders in a single call. Returns direct download links for each file found. Use this instead of manually browsing through folders when looking for a specific file.',
     {
       driveId: z.string().describe('The OneDrive drive ID (get it from list-drives)'),
       query: z.string().describe('Search text to find files (e.g. "resume" or "budget 2024")'),
@@ -382,16 +382,34 @@ MicrosoftGraphServer.prototype.initialize = async function (version) {
         log(`search-onedrive-files: ${searchPath}`);
         const result = await this.graphClient.makeRequest(searchPath);
 
-        // Simplify results to reduce token usage
-        const items = (result.value || []).map(item => ({
-          name: item.name,
-          id: item.id,
-          webUrl: item.webUrl,
-          size: item.size,
-          folder: item.folder ? { childCount: item.folder.childCount } : undefined,
-          file: item.file ? { mimeType: item.file.mimeType } : undefined,
-          parentPath: item.parentReference?.path?.replace(/.*root:/, '') || '/',
-        }));
+        // For each file result, fetch the item metadata to get the direct download URL.
+        // The @microsoft.graph.downloadUrl is a pre-authenticated URL that opens/downloads
+        // the file directly without requiring the user to navigate OneDrive.
+        const rawItems = result.value || [];
+        const items = [];
+        for (const item of rawItems) {
+          const entry = {
+            name: item.name,
+            id: item.id,
+            size: item.size,
+            folder: item.folder ? { childCount: item.folder.childCount } : undefined,
+            file: item.file ? { mimeType: item.file.mimeType } : undefined,
+            parentPath: item.parentReference?.path?.replace(/.*root:/, '') || '/',
+            downloadUrl: null,
+            webUrl: item.webUrl,
+          };
+
+          // Fetch direct download URL for files (not folders)
+          if (item.file && item.id) {
+            try {
+              const itemMeta = await this.graphClient.makeRequest(`/drives/${driveId}/items/${item.id}`);
+              entry.downloadUrl = itemMeta['@microsoft.graph.downloadUrl'] || null;
+            } catch (e) {
+              log(`search-onedrive-files: failed to get downloadUrl for ${item.name}: ${e.message}`);
+            }
+          }
+          items.push(entry);
+        }
 
         log(`search-onedrive-files: found ${items.length} results for "${query}"`);
         return {
