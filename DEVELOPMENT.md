@@ -474,6 +474,11 @@ MS365_MCP_CLIENT_ID=your-client-id MS365_REFRESH_TOKEN=your-token MS365_MCP_TENA
   1. Strips ALL query params from exact `/me/drives` endpoint — GPT-4o adds OData params ($count, $skip, $top) which Microsoft rejects with 400. Sub-paths like `/me/drives/{id}/items/...` are unaffected.
   2. Filters `/me/drives` response to only include drives with `driveType === 'personal'` or `name === 'OneDrive'` — removes internal drives (ODCMetadataArchive, Bundles) that return 400 "ObjectHandle is Invalid"
 - **URL encoding gotcha**: `graph-tools.js` uses `encodeURIComponent()` on OData param names, so `$count` becomes `%24count` in the URL. Any URL manipulation must handle both encoded and literal forms.
+- **Patches MicrosoftGraphServer.prototype.initialize** to register custom `search-onedrive-files` MCP tool:
+  - Uses `GET /drives/{id}/root/search(q='text')` which works for personal accounts (unlike `search-query` POST /search/query)
+  - Searches recursively through ALL subfolders in a single API call (solves context window overflow when using `fetchAllPages` on large folders)
+  - Simplifies response to minimize token usage (name, id, webUrl, size, parentPath)
+  - Uses `createRequire()` to resolve zod from the server's dependencies since `NODE_PATH` isn't available at runtime
 - Refreshes token every 45 minutes via `setInterval`
 
 ### Railway Deployment Steps
@@ -1438,6 +1443,7 @@ For the AI to proactively use device sensors (camera, GPS), several architectura
 - ~~MS365 Login Tool Fix~~: Wrapper patches `testLogin` to return proper `{success: true, ...}` object instead of bare `true` — fixes fallthrough to device code flow
 - ~~MS365 OneDrive Drive Selection~~: AI instructions tell GPT-4o to select the drive named "OneDrive" from `list-drives` results, ignoring internal drives like ODCMetadataArchive that return 400 errors
 - ~~MS365 OneDrive GraphClient Patch~~: Wrapper patches `GraphClient.prototype.makeRequest` to (1) strip ALL query params from `/me/drives` — GPT-4o adds $count/$skip/$top which Microsoft rejects, and (2) filter response to only include personal OneDrive drives
+- ~~MS365 OneDrive File Search~~: Custom `search-onedrive-files` MCP tool uses `GET /drives/{id}/root/search(q='text')` — works for personal accounts, searches ALL subfolders recursively in one call (solves context window overflow from `fetchAllPages` on large folders)
 
 ---
 
