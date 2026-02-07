@@ -306,10 +306,11 @@ const originalMakeRequest = GraphClient.prototype.makeRequest;
 GraphClient.prototype.makeRequest = async function (endpoint, options = {}) {
   // Strip $count from /me/drives requests — GPT-4o passes count:true but
   // Microsoft's /me/drives endpoint doesn't support $count, returning 400.
+  // Note: graph-tools.js URL-encodes query params, so $count becomes %24count.
   let cleanEndpoint = endpoint;
   if (endpoint.startsWith('/me/drives')) {
     cleanEndpoint = endpoint
-      .replace(/[?&]\$count=[^&]*/g, '')
+      .replace(/[?&](?:\$|%24)count=[^&]*/g, '')
       .replace(/\?$/, '');
     if (cleanEndpoint !== endpoint) {
       log(`Stripped unsupported params from /me/drives: "${endpoint}" → "${cleanEndpoint}"`);

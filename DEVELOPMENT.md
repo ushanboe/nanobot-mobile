@@ -447,23 +447,30 @@ MS365_MCP_CLIENT_ID=your-client-id MS365_REFRESH_TOKEN=your-token MS365_MCP_TENA
 - Refresh tokens last ~90 days. After expiry, re-run `setup-ms365-token.js`
 - Microsoft account linking can cause confusion: `user@company.com` may resolve to `user@outlook.com` if the accounts are linked. The `/me` endpoint in test-onedrive.js shows which identity was actually resolved.
 
-**MS365 MCP server internals** (`@softeria/ms-365-mcp-server`):
+**MS365 MCP server internals** (`@softeria/ms-365-mcp-server` v0.35.0):
 - Always uses `PublicClientApplication` from MSAL (regardless of whether client secret is set)
 - Token cache stored at `<npm-global-root>/@softeria/ms-365-mcp-server/.token-cache.json` (file fallback when keytar is unavailable in Docker)
 - Selected account stored at `<npm-global-root>/@softeria/ms-365-mcp-server/.selected-account.json`
 - Selected account format: `{"accountId": "homeAccountId-value"}` — NOT `{"homeAccountId": "..."}`
 - `getToken()` calls `acquireTokenSilent()` which uses the refresh token to get new access tokens
 - If token cache is empty (no accounts), throws "No valid token found" — this means pre-seeding failed
-- **Known bug**: Server caches `MS365_MCP_OAUTH_TOKEN` env var once in the constructor. Token refreshes that update `process.env` have no effect. Our `ms365-wrapper.mjs` patches `AuthManager.prototype.getToken` to re-read from `process.env` on every call.
+- **Known bugs** (all fixed by `ms365-wrapper.mjs` patches):
+  1. Server caches `MS365_MCP_OAUTH_TOKEN` env var once in the constructor. Token refreshes that update `process.env` have no effect.
+  2. In OAuth mode, MSAL cache has no accounts. `getCurrentAccount()` returns null, `listAccounts()` returns empty array, `login` tool says "no accounts linked".
+  3. `login` tool checks `loginStatus.success` property. If testLogin returns bare `true`, `.success` is `undefined` → falls through to device code flow.
+- **OneDrive multi-drive issue**: `/me/drives` returns multiple drives including internal ones (ODCMetadataArchive, Bundles). The actual OneDrive is typically NOT the first. ODCMetadataArchive returns 400 "ObjectHandle is Invalid". AI instructions must explicitly tell GPT-4o to select the drive named "OneDrive" (driveType: personal).
 
-**ms365-wrapper.mjs** (token lifecycle manager):
+**ms365-wrapper.mjs** (token lifecycle manager + AuthManager patcher):
 - Reads config from `/app/ms365-config.json` (written by `entrypoint.sh`) since nanobot doesn't pass env vars to child processes
 - Gets refresh token from MSAL cache file OR `/app/.ms365-refresh-token` (from `MS365_REFRESH_TOKEN` env var)
 - Calls Microsoft token endpoint directly to exchange refresh token for access token
 - Sets `process.env.MS365_MCP_OAUTH_TOKEN` before importing the server
-- Patches `AuthManager.prototype.getToken` to re-read from `process.env` (fixes stale token bug)
+- **Patches 4 AuthManager prototype methods** (all applied BEFORE server import — ESM singleton ensures they take effect):
+  1. `getToken` — re-reads from `process.env.MS365_MCP_OAUTH_TOKEN` on every call (fixes stale constructor-cached token)
+  2. `getCurrentAccount` — decodes JWT access token payload to return synthetic account object (homeAccountId, username, name, tenantId) when MSAL cache is empty in OAuth mode
+  3. `listAccounts` — returns synthetic account from `getCurrentAccount` when MSAL cache returns empty array (fixes "no accounts linked")
+  4. `testLogin` — calls Graph API `/me` endpoint and returns `{success: true, message: "...", userData: {...}}` object. **CRITICAL**: must return object with `.success` property, NOT bare `true`. The `login` tool checks `loginStatus.success` — bare `true` has `.success === undefined`, causing fallthrough to device code flow which fails for personal accounts.
 - Refreshes token every 45 minutes via `setInterval`
-- Imports `auth.js` before `index.js` (ESM singleton ensures patched prototype is used by server)
 
 ### Railway Deployment Steps
 
@@ -1175,7 +1182,49 @@ Then update `MS365_REFRESH_TOKEN` in Railway with the new token.
 MS365_MCP_CLIENT_ID=your-id MS365_REFRESH_TOKEN=new-token MS365_MCP_TENANT_ID=consumers node test-onedrive.js
 ```
 
-### 24. MS365 Authenticates as Wrong Microsoft Account (Account Linking)
+### 24. MS365 "No Microsoft Accounts Linked" Despite Working Token
+
+**Error**: AI says "There are no Microsoft accounts currently linked" even though deploy logs show `ACCESS TOKEN ACQUIRED` and `MS365_MCP_OAUTH_TOKEN set: true`.
+
+**Cause**: In OAuth mode (using `MS365_MCP_OAUTH_TOKEN` env var), the MSAL token cache is empty — no accounts were added via device code flow. The server's `getCurrentAccount()` queries the MSAL cache, finds 0 accounts, returns null. `listAccounts()` returns empty array. The `list-accounts` and `login` tools report "no accounts" even though Graph API calls work fine with the OAuth token.
+
+**Solution (implemented in ms365-wrapper.mjs)**:
+- Patched `getCurrentAccount` to decode the JWT access token and return a synthetic account object (with `homeAccountId`, `username`, `name`, `tenantId` from the JWT payload)
+- Patched `listAccounts` to return the synthetic account when MSAL cache is empty
+- These patches are applied BEFORE the server is imported (ESM singleton ensures they take effect)
+
+### 25. MS365 Login Tool Falls Through to Device Code Flow
+
+**Error**: Despite auth working, the `login` tool triggers device code flow ("To sign in, use a web browser to open...") instead of recognizing the existing session.
+
+**Cause**: The wrapper's initial `testLogin` patch returned bare `true` instead of a proper result object. The `login` tool (`auth-tools.js` line 12-13) checks `loginStatus.success` — on bare boolean `true`, `.success` is `undefined` (falsy), so it skips the "Already logged in" branch and falls through to `acquireTokenByDeviceCode()`, which fails for personal Microsoft accounts requesting all scopes.
+
+**Solution (implemented in ms365-wrapper.mjs)**: Fixed `testLogin` patch to return `{success: true, message: "Login successful", userData: {displayName, userPrincipalName}}` by calling Graph API `/me` endpoint. The `.success` property is now properly set.
+
+### 26. MS365 OneDrive Tools Fail with "ObjectHandle is Invalid"
+
+**Error**: GPT-4o calls `list-drives` then `list-folder-files` but gets 400 "ObjectHandle is Invalid" error. Deploy logs and test scripts confirm token and Graph API work fine.
+
+**Cause**: `/me/drives` returns **multiple drives** (e.g., 4 drives for personal Microsoft accounts):
+1. `ODCMetadataArchive` — internal, returns 400 when queried
+2. `Bundles_xxx` — internal
+3. `AEEE102E-xxx` — internal
+4. `OneDrive` (driveType: personal) — the actual user OneDrive
+
+GPT-4o picks the first drive from the list, which is `ODCMetadataArchive`. All subsequent `list-folder-files` calls using that drive ID fail with "ObjectHandle is Invalid".
+
+**Solution (implemented in entrypoint.sh)**: Updated AI instructions to explicitly tell GPT-4o: "When you get multiple drives from list-drives, always use the drive named 'OneDrive' (driveType: 'personal'). Ignore drives named ODCMetadataArchive or Bundles."
+
+**How to verify**: Run `test-onedrive.js` — it tests `/me/drives` and shows all drive names and IDs. Or test directly:
+```bash
+curl -s 'https://graph.microsoft.com/v1.0/me/drives' \
+  -H "Authorization: Bearer $TOKEN" | node -e "
+  const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+  d.value.forEach(v => console.log(v.name, v.id, v.driveType));
+"
+```
+
+### 27. MS365 Authenticates as Wrong Microsoft Account (Account Linking)
 
 **Error**: AI returns emails or OneDrive files from `user@outlook.com` instead of the expected `user@company.com` that was selected during device code login.
 
@@ -1368,6 +1417,9 @@ For the AI to proactively use device sensors (camera, GPS), several architectura
 - ~~MS365 Wrapper~~: `ms365-wrapper.mjs` manages token lifecycle — pre-acquires access token, patches AuthManager.getToken, refreshes every 45 min
 - ~~MS365 Refresh Token Fallback~~: `MS365_REFRESH_TOKEN` env var as simpler alternative to `MS365_TOKEN_CACHE_JSON` (Railway was truncating the large JSON to 0 chars)
 - ~~MS365 Diagnostic Script~~: `test-onedrive.js` tests the full Graph API chain (refresh → access token → /me → /me/drive → files) without involving nanobot
+- ~~MS365 OAuth Account Discovery~~: Wrapper patches `getCurrentAccount` and `listAccounts` to return synthetic accounts decoded from JWT when MSAL cache is empty in OAuth mode
+- ~~MS365 Login Tool Fix~~: Wrapper patches `testLogin` to return proper `{success: true, ...}` object instead of bare `true` — fixes fallthrough to device code flow
+- ~~MS365 OneDrive Drive Selection~~: AI instructions tell GPT-4o to select the drive named "OneDrive" from `list-drives` results, ignoring internal drives like ODCMetadataArchive that return 400 errors
 
 ---
 
