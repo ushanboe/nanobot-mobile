@@ -38,12 +38,24 @@ if [ -n "$MS365_MCP_CLIENT_ID" ] && [ -n "$MS365_MCP_CLIENT_SECRET" ]; then
   # The ms-365-mcp-server stores its token cache at <package-root>/.token-cache.json
   if [ -n "$MS365_TOKEN_CACHE_JSON" ]; then
     MS365_PKG_ROOT="$(npm root -g)/@softeria/ms-365-mcp-server"
+    echo "  npm root -g: $(npm root -g)"
+    echo "  MS365 package root: $MS365_PKG_ROOT"
+    echo "  Package dir exists: $([ -d "$MS365_PKG_ROOT" ] && echo yes || echo no)"
+    echo "  dist dir exists: $([ -d "$MS365_PKG_ROOT/dist" ] && echo yes || echo no)"
     if [ -d "$MS365_PKG_ROOT" ]; then
       printf '%s' "$MS365_TOKEN_CACHE_JSON" > "$MS365_PKG_ROOT/.token-cache.json"
       chmod 600 "$MS365_PKG_ROOT/.token-cache.json"
-      echo "  Token cache pre-seeded at $MS365_PKG_ROOT/.token-cache.json ($(wc -c < "$MS365_PKG_ROOT/.token-cache.json") bytes)"
+      echo "  Token cache written: $MS365_PKG_ROOT/.token-cache.json ($(wc -c < "$MS365_PKG_ROOT/.token-cache.json") bytes)"
+      # Verify the JSON is valid
+      if node -e "JSON.parse(require('fs').readFileSync('$MS365_PKG_ROOT/.token-cache.json','utf8'))" 2>/dev/null; then
+        echo "  Token cache JSON: valid"
+      else
+        echo "  WARNING: Token cache JSON is invalid!"
+      fi
     else
-      echo "  WARNING: MS365 package not found at $MS365_PKG_ROOT - token cache not pre-seeded"
+      echo "  WARNING: MS365 package not found at $MS365_PKG_ROOT"
+      echo "  Listing global packages:"
+      ls "$(npm root -g)/" 2>/dev/null || echo "    (failed to list)"
     fi
   else
     echo "  Note: No MS365_TOKEN_CACHE_JSON set - user must complete device code login"
@@ -53,9 +65,18 @@ if [ -n "$MS365_MCP_CLIENT_ID" ] && [ -n "$MS365_MCP_CLIENT_SECRET" ]; then
   if [ -n "$MS365_SELECTED_ACCOUNT_JSON" ]; then
     MS365_PKG_ROOT="${MS365_PKG_ROOT:-$(npm root -g)/@softeria/ms-365-mcp-server}"
     if [ -d "$MS365_PKG_ROOT" ]; then
-      printf '%s' "$MS365_SELECTED_ACCOUNT_JSON" > "$MS365_PKG_ROOT/.selected-account.json"
+      # Transform format if needed: server expects {"accountId":"..."} not {"homeAccountId":"..."}
+      ACCOUNT_ID=$(echo "$MS365_SELECTED_ACCOUNT_JSON" | node -e "
+        const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+        process.stdout.write(JSON.stringify({accountId: d.accountId || d.homeAccountId}));
+      " 2>/dev/null)
+      if [ -n "$ACCOUNT_ID" ]; then
+        printf '%s' "$ACCOUNT_ID" > "$MS365_PKG_ROOT/.selected-account.json"
+      else
+        printf '%s' "$MS365_SELECTED_ACCOUNT_JSON" > "$MS365_PKG_ROOT/.selected-account.json"
+      fi
       chmod 600 "$MS365_PKG_ROOT/.selected-account.json"
-      echo "  Selected account pre-seeded"
+      echo "  Selected account written: $(cat "$MS365_PKG_ROOT/.selected-account.json")"
     fi
   fi
 fi

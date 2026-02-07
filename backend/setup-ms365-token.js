@@ -62,10 +62,9 @@ async function main() {
 
   // Serialize the MSAL token cache
   const cacheData = pca.getTokenCache().serialize();
+  // The ms-365-mcp-server expects {"accountId": homeAccountId} format
   const selectedAccount = JSON.stringify({
-    homeAccountId: response.account.homeAccountId,
-    environment: response.account.environment,
-    username: response.account.username,
+    accountId: response.account.homeAccountId,
   });
 
   console.log('Set these as Railway environment variables:\n');
