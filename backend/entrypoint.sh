@@ -207,6 +207,8 @@ if [ "$MS365_READY" = true ]; then
       You can access the user's Microsoft 365 account for Outlook email and OneDrive files.
       You are already logged in - do NOT call the login tool or ask the user to log in.
       For OneDrive: first call list-drives to get all drives. IMPORTANT: The account has multiple drives including internal ones like 'ODCMetadataArchive' that will return errors. Always use the drive named 'OneDrive' (driveType: 'personal'). Ignore any drives named ODCMetadataArchive or Bundles. Once you have the correct OneDrive drive ID, use it with list-folder-files (use driveItemId=root for the root folder).
+      When listing folder contents, ALWAYS set fetchAllPages to true to get all items (some folders have 100+ files).
+      When searching for a specific file, check multiple folders including subfolders. List the contents of each folder with fetchAllPages=true and search the file names. If not found in root, check Documents, Personal docs, Desktop, and their subfolders recursively.
       For email: use list-mail-messages to search and read Outlook emails."
   EXTRA_AGENT_SERVERS="${EXTRA_AGENT_SERVERS}
       - microsoft365"
