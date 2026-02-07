@@ -470,6 +470,10 @@ MS365_MCP_CLIENT_ID=your-client-id MS365_REFRESH_TOKEN=your-token MS365_MCP_TENA
   2. `getCurrentAccount` — decodes JWT access token payload to return synthetic account object (homeAccountId, username, name, tenantId) when MSAL cache is empty in OAuth mode
   3. `listAccounts` — returns synthetic account from `getCurrentAccount` when MSAL cache returns empty array (fixes "no accounts linked")
   4. `testLogin` — calls Graph API `/me` endpoint and returns `{success: true, message: "...", userData: {...}}` object. **CRITICAL**: must return object with `.success` property, NOT bare `true`. The `login` tool checks `loginStatus.success` — bare `true` has `.success === undefined`, causing fallthrough to device code flow which fails for personal accounts.
+- **Patches GraphClient.prototype.makeRequest** (also BEFORE server import):
+  1. Strips ALL query params from exact `/me/drives` endpoint — GPT-4o adds OData params ($count, $skip, $top) which Microsoft rejects with 400. Sub-paths like `/me/drives/{id}/items/...` are unaffected.
+  2. Filters `/me/drives` response to only include drives with `driveType === 'personal'` or `name === 'OneDrive'` — removes internal drives (ODCMetadataArchive, Bundles) that return 400 "ObjectHandle is Invalid"
+- **URL encoding gotcha**: `graph-tools.js` uses `encodeURIComponent()` on OData param names, so `$count` becomes `%24count` in the URL. Any URL manipulation must handle both encoded and literal forms.
 - Refreshes token every 45 minutes via `setInterval`
 
 ### Railway Deployment Steps
@@ -1224,7 +1228,20 @@ curl -s 'https://graph.microsoft.com/v1.0/me/drives' \
 "
 ```
 
-### 27. MS365 Authenticates as Wrong Microsoft Account (Account Linking)
+### 27. MS365 list-drives Returns 400 Due to OData Query Parameters
+
+**Error**: `list-drives` tool returns 400 with messages like `"$count is not supported on this API"` or `"$skip is not supported on this API"`.
+
+**Cause**: GPT-4o adds OData query parameters ($count, $skip, $top, etc.) to `list-drives` tool calls. The server's `graph-tools.js` accepts these as valid parameters and URL-encodes them (e.g., `$count` → `%24count`). Microsoft's `/me/drives` endpoint rejects ALL OData parameters with 400 errors.
+
+**Why this was hard to fix**:
+1. First fix stripped `$count` only — GPT-4o switched to `$skip`
+2. URL encoding: `graph-tools.js` uses `encodeURIComponent()`, so `$count` becomes `%24count`. Initial regex `\$count` didn't match the encoded form.
+3. Whack-a-mole approach doesn't work — GPT-4o will keep trying different OData params.
+
+**Solution (implemented in ms365-wrapper.mjs)**: GraphClient.makeRequest patch strips ALL query parameters from the exact `/me/drives` endpoint. This endpoint is a simple drive listing that needs no parameters. Sub-paths like `/me/drives/{id}/items/...` are unaffected.
+
+### 28. MS365 Authenticates as Wrong Microsoft Account (Account Linking)
 
 **Error**: AI returns emails or OneDrive files from `user@outlook.com` instead of the expected `user@company.com` that was selected during device code login.
 
@@ -1420,6 +1437,7 @@ For the AI to proactively use device sensors (camera, GPS), several architectura
 - ~~MS365 OAuth Account Discovery~~: Wrapper patches `getCurrentAccount` and `listAccounts` to return synthetic accounts decoded from JWT when MSAL cache is empty in OAuth mode
 - ~~MS365 Login Tool Fix~~: Wrapper patches `testLogin` to return proper `{success: true, ...}` object instead of bare `true` — fixes fallthrough to device code flow
 - ~~MS365 OneDrive Drive Selection~~: AI instructions tell GPT-4o to select the drive named "OneDrive" from `list-drives` results, ignoring internal drives like ODCMetadataArchive that return 400 errors
+- ~~MS365 OneDrive GraphClient Patch~~: Wrapper patches `GraphClient.prototype.makeRequest` to (1) strip ALL query params from `/me/drives` — GPT-4o adds $count/$skip/$top which Microsoft rejects, and (2) filter response to only include personal OneDrive drives
 
 ---
 

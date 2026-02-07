@@ -349,6 +349,69 @@ GraphClient.prototype.makeRequest = async function (endpoint, options = {}) {
 };
 log('Patched GraphClient.prototype.makeRequest to filter /me/drives');
 
+// Patch MicrosoftGraphServer.prototype.initialize to add custom search tool.
+// The MS365 MCP server's `search-query` tool (POST /search/query) doesn't work
+// for personal Microsoft accounts. But the OneDrive-specific search endpoint
+// GET /drives/{id}/root/search(q='text') DOES work. We register this as a custom
+// MCP tool so GPT-4o can search for files without recursively browsing all folders
+// (which fills the context window on large folders like Personal docs with 146 items).
+const serverModule = await import(pathToFileURL(path.join(pkgRoot, 'dist', 'server.js')).href);
+const MicrosoftGraphServer = serverModule.default;
+const originalInitialize = MicrosoftGraphServer.prototype.initialize;
+MicrosoftGraphServer.prototype.initialize = async function (version) {
+  await originalInitialize.call(this, version);
+
+  // Import zod for parameter schema
+  const { z } = await import('zod');
+
+  this.server.tool(
+    'search-onedrive-files',
+    'Search for files and folders on OneDrive by name or keyword. Searches recursively through ALL folders and subfolders in a single call. Use this instead of manually browsing through folders when looking for a specific file.',
+    {
+      driveId: z.string().describe('The OneDrive drive ID (get it from list-drives)'),
+      query: z.string().describe('Search text to find files (e.g. "resume" or "budget 2024")'),
+    },
+    async ({ driveId, query }) => {
+      try {
+        // Use the OneDrive-specific search endpoint (works for personal accounts)
+        const searchPath = `/drives/${driveId}/root/search(q='${query}')`;
+        log(`search-onedrive-files: ${searchPath}`);
+        const result = await this.graphClient.makeRequest(searchPath);
+
+        // Simplify results to reduce token usage
+        const items = (result.value || []).map(item => ({
+          name: item.name,
+          id: item.id,
+          webUrl: item.webUrl,
+          size: item.size,
+          folder: item.folder ? { childCount: item.folder.childCount } : undefined,
+          file: item.file ? { mimeType: item.file.mimeType } : undefined,
+          parentPath: item.parentReference?.path?.replace(/.*root:/, '') || '/',
+        }));
+
+        log(`search-onedrive-files: found ${items.length} results for "${query}"`);
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({ results: items, count: items.length }),
+          }],
+        };
+      } catch (error) {
+        log(`search-onedrive-files error: ${error.message}`);
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({ error: error.message }),
+          }],
+          isError: true,
+        };
+      }
+    }
+  );
+  log('Registered custom search-onedrive-files tool');
+};
+log('Patched MicrosoftGraphServer.prototype.initialize to add search tool');
+
 // Import and run the actual server
 log(`Starting server... (MS365_MCP_OAUTH_TOKEN set: ${!!process.env.MS365_MCP_OAUTH_TOKEN})`);
 await import(pathToFileURL(serverEntry).href);

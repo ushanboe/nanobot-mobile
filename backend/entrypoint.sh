@@ -206,9 +206,9 @@ if [ "$MS365_READY" = true ]; then
   EXTRA_INSTRUCTIONS="${EXTRA_INSTRUCTIONS}
       You can access the user's Microsoft 365 account for Outlook email and OneDrive files.
       You are already logged in - do NOT call the login tool or ask the user to log in.
-      For OneDrive: first call list-drives to get all drives. IMPORTANT: The account has multiple drives including internal ones like 'ODCMetadataArchive' that will return errors. Always use the drive named 'OneDrive' (driveType: 'personal'). Ignore any drives named ODCMetadataArchive or Bundles. Once you have the correct OneDrive drive ID, use it with list-folder-files (use driveItemId=root for the root folder).
-      When listing folder contents, ALWAYS set fetchAllPages to true to get all items (some folders have 100+ files).
-      IMPORTANT: When searching for a specific file, you MUST search recursively through subfolders. Files are often nested 2-3 levels deep (e.g., Personal docs > PBoe Resumes and Bios > resume.doc). For each top-level folder (especially Personal docs, Documents, Desktop), list its contents with fetchAllPages=true, then for EVERY subfolder found inside it, also list that subfolder contents. Keep going deeper until you find the file or exhaust all directories. Do NOT give up after only checking top-level folders.
+      For OneDrive: first call list-drives to get all drives. IMPORTANT: The account has multiple drives including internal ones like 'ODCMetadataArchive' that will return errors. Always use the drive named 'OneDrive' (driveType: 'personal'). Ignore any drives named ODCMetadataArchive or Bundles. Once you have the correct OneDrive drive ID, use it for file operations.
+      IMPORTANT: When looking for a specific file, ALWAYS use the search-onedrive-files tool first. It searches recursively through ALL folders and subfolders in a single call. Pass the OneDrive drive ID and a search query. Only fall back to manual folder browsing with list-folder-files if search returns no results.
+      When listing folder contents with list-folder-files, ALWAYS set fetchAllPages to true to get all items.
       For email: use list-mail-messages to search and read Outlook emails."
   EXTRA_AGENT_SERVERS="${EXTRA_AGENT_SERVERS}
       - microsoft365"
