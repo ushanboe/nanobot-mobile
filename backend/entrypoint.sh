@@ -28,14 +28,36 @@ if [ -n "$GMAIL_OAUTH_KEYS_JSON" ] && [ -n "$GMAIL_CREDENTIALS_JSON" ]; then
   fi
 fi
 
-# MS365 env vars are read directly by the ms-365-mcp-server
-# Note: MS365 uses device code flow - user must log in at microsoft.com/devicelogin
-# on first use (and after each container restart, since Railway filesystems are ephemeral)
+# MS365: env vars read by ms-365-mcp-server + optional pre-seeded token cache
 MS365_READY=false
 if [ -n "$MS365_MCP_CLIENT_ID" ] && [ -n "$MS365_MCP_CLIENT_SECRET" ]; then
   MS365_READY=true
   echo "MS365 credentials configured (client_id and client_secret set)"
-  echo "  Note: User must complete device code login on first chat request"
+
+  # Pre-seed MSAL token cache if provided (avoids device code login on every deploy)
+  # The ms-365-mcp-server stores its token cache at <package-root>/.token-cache.json
+  if [ -n "$MS365_TOKEN_CACHE_JSON" ]; then
+    MS365_PKG_ROOT="$(npm root -g)/@softeria/ms-365-mcp-server"
+    if [ -d "$MS365_PKG_ROOT" ]; then
+      printf '%s' "$MS365_TOKEN_CACHE_JSON" > "$MS365_PKG_ROOT/.token-cache.json"
+      chmod 600 "$MS365_PKG_ROOT/.token-cache.json"
+      echo "  Token cache pre-seeded at $MS365_PKG_ROOT/.token-cache.json ($(wc -c < "$MS365_PKG_ROOT/.token-cache.json") bytes)"
+    else
+      echo "  WARNING: MS365 package not found at $MS365_PKG_ROOT - token cache not pre-seeded"
+    fi
+  else
+    echo "  Note: No MS365_TOKEN_CACHE_JSON set - user must complete device code login"
+  fi
+
+  # Pre-seed selected account if provided
+  if [ -n "$MS365_SELECTED_ACCOUNT_JSON" ]; then
+    MS365_PKG_ROOT="${MS365_PKG_ROOT:-$(npm root -g)/@softeria/ms-365-mcp-server}"
+    if [ -d "$MS365_PKG_ROOT" ]; then
+      printf '%s' "$MS365_SELECTED_ACCOUNT_JSON" > "$MS365_PKG_ROOT/.selected-account.json"
+      chmod 600 "$MS365_PKG_ROOT/.selected-account.json"
+      echo "  Selected account pre-seeded"
+    fi
+  fi
 fi
 
 # Build dynamic nanobot.yaml with only available MCP servers
@@ -77,12 +99,15 @@ elif [ "$MS365_READY" = true ]; then
       Use Microsoft 365 tools when the user asks about emails. If the tools require login, provide the device code login instructions."
 fi
 
+TODAY=$(date -u +"%Y-%m-%d")
+
 cat > /app/nanobot.yaml << YAML
 agents:
   assistant:
     model: gpt-4o
     instructions: |
       You are a helpful AI assistant with access to powerful tools.
+      Today's date is ${TODAY}.
       When the user asks a question that needs current information, use web search.
       When the user shares a URL, use fetch to read its contents.
       Think step by step for complex problems using sequential thinking.
