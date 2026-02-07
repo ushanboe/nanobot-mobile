@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 /**
- * Wrapper for @softeria/ms-365-mcp-server that writes the token cache
- * from environment variables BEFORE importing the server.
+ * Wrapper for @softeria/ms-365-mcp-server that:
+ * 1. Writes the token cache from env vars
+ * 2. Acquires a fresh access token using MSAL
+ * 3. Sets MS365_MCP_OAUTH_TOKEN so the server uses it directly
+ * 4. Periodically refreshes the token before it expires
+ * 5. Imports and runs the actual server
  *
- * Receives the package root via MS365_PKG_ROOT env var (set by entrypoint.sh)
- * to avoid require.resolve / NODE_PATH issues in child processes.
+ * Receives the package root via MS365_PKG_ROOT env var (set by entrypoint.sh).
  */
 import fs from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
 
-// Get package root from env var (set by entrypoint.sh) or try known global path
 const pkgRoot = process.env.MS365_PKG_ROOT || '/usr/local/lib/node_modules/@softeria/ms-365-mcp-server';
 const serverEntry = path.join(pkgRoot, 'dist', 'index.js');
 const cachePath = path.join(pkgRoot, '.token-cache.json');
@@ -18,32 +20,18 @@ const accountPath = path.join(pkgRoot, '.selected-account.json');
 
 console.error(`[ms365-wrapper] Package root: ${pkgRoot}`);
 console.error(`[ms365-wrapper] Server entry: ${serverEntry}`);
-console.error(`[ms365-wrapper] Cache path: ${cachePath}`);
 
-// Verify server entry exists
 if (!fs.existsSync(serverEntry)) {
   console.error(`[ms365-wrapper] ERROR: Server entry not found at ${serverEntry}`);
-  console.error(`[ms365-wrapper] Package root contents: ${JSON.stringify(fs.existsSync(pkgRoot) ? fs.readdirSync(pkgRoot) : 'DIR NOT FOUND')}`);
   process.exit(1);
 }
 
-// Write token cache from env var
+// Write token cache and selected account files from env vars
 if (process.env.MS365_TOKEN_CACHE_JSON) {
   fs.writeFileSync(cachePath, process.env.MS365_TOKEN_CACHE_JSON);
   fs.chmodSync(cachePath, 0o600);
-  try {
-    const data = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
-    const accounts = Object.keys(data.Account || {}).length;
-    const refreshTokens = Object.keys(data.RefreshToken || {}).length;
-    console.error(`[ms365-wrapper] Token cache written: ${fs.statSync(cachePath).size} bytes, ${accounts} account(s), ${refreshTokens} refresh token(s)`);
-  } catch (e) {
-    console.error(`[ms365-wrapper] WARNING: Token cache JSON invalid: ${e.message}`);
-  }
-} else {
-  console.error(`[ms365-wrapper] WARNING: MS365_TOKEN_CACHE_JSON not set`);
+  console.error(`[ms365-wrapper] Token cache written: ${fs.statSync(cachePath).size} bytes`);
 }
-
-// Write selected account from env var
 if (process.env.MS365_SELECTED_ACCOUNT_JSON) {
   try {
     const d = JSON.parse(process.env.MS365_SELECTED_ACCOUNT_JSON);
@@ -52,10 +40,90 @@ if (process.env.MS365_SELECTED_ACCOUNT_JSON) {
     fs.chmodSync(accountPath, 0o600);
     console.error(`[ms365-wrapper] Selected account: ${formatted}`);
   } catch (e) {
-    console.error(`[ms365-wrapper] WARNING: Selected account write failed: ${e.message}`);
+    console.error(`[ms365-wrapper] Selected account write failed: ${e.message}`);
   }
 }
 
-// Import and run the actual server using file:// URL (required for ESM imports)
+// Attempt to acquire a fresh access token and inject it via MS365_MCP_OAUTH_TOKEN
+// This bypasses the server's own loadTokenCache/getToken which may have issues
+if (process.env.MS365_TOKEN_CACHE_JSON && process.env.MS365_MCP_CLIENT_ID) {
+  try {
+    const { PublicClientApplication } = await import('@azure/msal-node');
+    const pca = new PublicClientApplication({
+      auth: {
+        clientId: process.env.MS365_MCP_CLIENT_ID,
+        authority: `https://login.microsoftonline.com/${process.env.MS365_MCP_TENANT_ID || 'common'}`,
+      },
+    });
+
+    // Deserialize the token cache
+    const cacheData = fs.readFileSync(cachePath, 'utf8');
+    pca.getTokenCache().deserialize(cacheData);
+
+    const accounts = await pca.getTokenCache().getAllAccounts();
+    console.error(`[ms365-wrapper] MSAL accounts after deserialize: ${accounts.length}`);
+
+    if (accounts.length > 0) {
+      // Find the right account (matching selected account or first)
+      let account = accounts[0];
+      if (process.env.MS365_SELECTED_ACCOUNT_JSON) {
+        try {
+          const sel = JSON.parse(process.env.MS365_SELECTED_ACCOUNT_JSON);
+          const selId = sel.accountId || sel.homeAccountId;
+          const found = accounts.find(a => a.homeAccountId === selId);
+          if (found) account = found;
+        } catch {}
+      }
+      console.error(`[ms365-wrapper] Using account: ${account.username}`);
+
+      // Use the same scopes that setup-ms365-token.js consented to
+      // (don't include offline_access — that's for getting refresh tokens, not a Graph scope)
+      const scopes = ['User.Read', 'Mail.Read', 'Mail.Send', 'Files.Read', 'Files.ReadWrite'];
+
+      try {
+        const result = await pca.acquireTokenSilent({ account, scopes });
+        process.env.MS365_MCP_OAUTH_TOKEN = result.accessToken;
+        console.error(`[ms365-wrapper] Got fresh token, expires: ${result.expiresOn}`);
+        console.error(`[ms365-wrapper] Token length: ${result.accessToken.length}`);
+
+        // Save updated cache (may have new access/refresh tokens)
+        const updatedCache = pca.getTokenCache().serialize();
+        fs.writeFileSync(cachePath, updatedCache);
+        console.error(`[ms365-wrapper] Updated token cache saved`);
+
+        // Schedule token refresh every 45 minutes (tokens last ~60 min)
+        setInterval(async () => {
+          try {
+            const r = await pca.acquireTokenSilent({ account, scopes, forceRefresh: true });
+            process.env.MS365_MCP_OAUTH_TOKEN = r.accessToken;
+            fs.writeFileSync(cachePath, pca.getTokenCache().serialize());
+            console.error(`[ms365-wrapper] Token refreshed, expires: ${r.expiresOn}`);
+          } catch (e) {
+            console.error(`[ms365-wrapper] Token refresh failed: ${e.message}`);
+          }
+        }, 45 * 60 * 1000);
+      } catch (e) {
+        console.error(`[ms365-wrapper] acquireTokenSilent failed: ${e.message}`);
+        console.error(`[ms365-wrapper] Will fall back to server's own auth flow`);
+      }
+    } else {
+      console.error(`[ms365-wrapper] No accounts in cache — token may be from incompatible MSAL version`);
+      // Log cache structure for debugging
+      try {
+        const parsed = JSON.parse(cacheData);
+        console.error(`[ms365-wrapper] Cache keys: ${Object.keys(parsed).join(', ')}`);
+        for (const [section, entries] of Object.entries(parsed)) {
+          if (typeof entries === 'object' && entries !== null) {
+            console.error(`[ms365-wrapper]   ${section}: ${Object.keys(entries).length} entries`);
+          }
+        }
+      } catch {}
+    }
+  } catch (e) {
+    console.error(`[ms365-wrapper] Token pre-acquisition failed: ${e.message}`);
+  }
+}
+
+// Import and run the actual server
 console.error(`[ms365-wrapper] Starting server...`);
 await import(pathToFileURL(serverEntry).href);
