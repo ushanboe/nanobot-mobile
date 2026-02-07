@@ -82,16 +82,14 @@ if [ -n "$MS365_MCP_CLIENT_ID" ] && [ -n "$MS365_MCP_CLIENT_SECRET" ]; then
       ls "$(npm root -g)/" 2>/dev/null || echo "    (failed to list)"
     fi
   else
-    echo "  Note: No MS365_TOKEN_CACHE_JSON set - user must complete device code login"
+    echo "  Note: No MS365_TOKEN_CACHE_JSON set"
   fi
 
-  # Write wrapper config file — nanobot doesn't pass env vars to child processes,
-  # so the wrapper reads credentials from this file instead.
-  # Also pre-acquire access token here (where all env vars are available)
-  # using the refresh token from the token cache.
-  MS365_ACCESS_TOKEN=""
+  # Get refresh token — prefer extracting from MSAL cache, fall back to MS365_REFRESH_TOKEN env var.
+  # MS365_REFRESH_TOKEN is a simple ~200 char string that's easy to paste into Railway,
+  # unlike MS365_TOKEN_CACHE_JSON which is a large complex JSON blob that may fail to save.
+  REFRESH_TOKEN=""
   if [ -n "$MS365_TOKEN_CACHE_JSON" ]; then
-    # Extract refresh token from cache
     REFRESH_TOKEN=$(printf '%s' "$MS365_TOKEN_CACHE_JSON" | node -e "
       const cache = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
       const tokens = cache.RefreshToken || {};
@@ -99,43 +97,53 @@ if [ -n "$MS365_MCP_CLIENT_ID" ] && [ -n "$MS365_MCP_CLIENT_SECRET" ]; then
         if (val.secret) { process.stdout.write(val.secret); break; }
       }
     " 2>/dev/null)
-
     if [ -n "$REFRESH_TOKEN" ]; then
-      RT_LEN=$(printf '%s' "$REFRESH_TOKEN" | wc -c)
-      echo "  Refresh token found ($RT_LEN chars)"
-
-      # Call Microsoft token endpoint to get fresh access token
-      SCOPES="User.Read Mail.Read Mail.Send Files.Read Files.ReadWrite offline_access"
-      TENANT="${MS365_MCP_TENANT_ID:-common}"
-      TOKEN_RESPONSE=$(curl -s -X POST \
-        "https://login.microsoftonline.com/$TENANT/oauth2/v2.0/token" \
-        -H "Content-Type: application/x-www-form-urlencoded" \
-        -d "grant_type=refresh_token&client_id=$MS365_MCP_CLIENT_ID&refresh_token=$REFRESH_TOKEN&scope=$SCOPES" 2>/dev/null)
-
-      MS365_ACCESS_TOKEN=$(printf '%s' "$TOKEN_RESPONSE" | node -e "
-        const d = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
-        if (d.access_token) process.stdout.write(d.access_token);
-        else process.stderr.write('Token error: ' + (d.error_description || d.error || 'unknown'));
-      " 2>&1 1>/dev/null | head -1)
-
-      # Check if that was an error message or if we got the token
-      ACTUAL_TOKEN=$(printf '%s' "$TOKEN_RESPONSE" | node -e "
-        const d = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
-        if (d.access_token) process.stdout.write(d.access_token);
-      " 2>/dev/null)
-
-      if [ -n "$ACTUAL_TOKEN" ]; then
-        AT_LEN=$(printf '%s' "$ACTUAL_TOKEN" | wc -c)
-        MS365_ACCESS_TOKEN="$ACTUAL_TOKEN"
-        echo "  ACCESS TOKEN ACQUIRED ($AT_LEN chars)"
-      else
-        MS365_ACCESS_TOKEN=""
-        echo "  WARNING: Token acquisition failed"
-        printf '%s' "$TOKEN_RESPONSE" | head -c 200
-        echo ""
-      fi
+      echo "  Refresh token extracted from MSAL cache ($(printf '%s' "$REFRESH_TOKEN" | wc -c) chars)"
     else
-      echo "  WARNING: No refresh token in cache"
+      echo "  WARNING: No refresh token found in MSAL cache"
+    fi
+  fi
+
+  # Fallback: use MS365_REFRESH_TOKEN env var directly
+  if [ -z "$REFRESH_TOKEN" ] && [ -n "$MS365_REFRESH_TOKEN" ]; then
+    REFRESH_TOKEN="$MS365_REFRESH_TOKEN"
+    echo "  Using MS365_REFRESH_TOKEN env var directly ($(printf '%s' "$REFRESH_TOKEN" | wc -c) chars)"
+  fi
+
+  # Write refresh token to file so wrapper can use it (nanobot doesn't pass env vars to children)
+  if [ -n "$REFRESH_TOKEN" ]; then
+    printf '%s' "$REFRESH_TOKEN" > /app/.ms365-refresh-token
+    chmod 600 /app/.ms365-refresh-token
+    echo "  Refresh token written to /app/.ms365-refresh-token"
+  else
+    echo "  WARNING: No refresh token available from cache or env var"
+    echo "  Set MS365_REFRESH_TOKEN in Railway (just the token string, ~200 chars)"
+    echo "  Or set MS365_TOKEN_CACHE_JSON (full MSAL cache JSON)"
+  fi
+
+  # Pre-acquire access token using the refresh token
+  MS365_ACCESS_TOKEN=""
+  if [ -n "$REFRESH_TOKEN" ]; then
+    SCOPES="User.Read Mail.Read Mail.Send Files.Read Files.ReadWrite offline_access"
+    TENANT="${MS365_MCP_TENANT_ID:-common}"
+    TOKEN_RESPONSE=$(curl -s -X POST \
+      "https://login.microsoftonline.com/$TENANT/oauth2/v2.0/token" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "grant_type=refresh_token&client_id=$MS365_MCP_CLIENT_ID&refresh_token=$REFRESH_TOKEN&scope=$SCOPES" 2>/dev/null)
+
+    ACTUAL_TOKEN=$(printf '%s' "$TOKEN_RESPONSE" | node -e "
+      const d = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+      if (d.access_token) process.stdout.write(d.access_token);
+    " 2>/dev/null)
+
+    if [ -n "$ACTUAL_TOKEN" ]; then
+      AT_LEN=$(printf '%s' "$ACTUAL_TOKEN" | wc -c)
+      MS365_ACCESS_TOKEN="$ACTUAL_TOKEN"
+      echo "  ACCESS TOKEN ACQUIRED ($AT_LEN chars)"
+    else
+      echo "  WARNING: Token acquisition failed"
+      printf '%s' "$TOKEN_RESPONSE" | head -c 300
+      echo ""
     fi
   fi
 

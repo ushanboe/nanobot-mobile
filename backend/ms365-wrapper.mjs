@@ -126,8 +126,14 @@ async function refreshAccessToken(refreshToken, clientId, tenantId, scopes) {
 // Pre-acquire access token
 let currentRefreshToken = null;
 const scopes = ['User.Read', 'Mail.Read', 'Mail.Send', 'Files.Read', 'Files.ReadWrite', 'offline_access'];
+const directRefreshTokenPath = '/app/.ms365-refresh-token';
 
-if (fs.existsSync(cachePath) && config.clientId) {
+// Try to get refresh token from multiple sources:
+// 1. MSAL token cache file (primary or fallback)
+// 2. Direct refresh token file written by entrypoint (from MS365_REFRESH_TOKEN env var)
+let refreshToken = null;
+
+if (fs.existsSync(cachePath)) {
   let cacheData;
   try {
     cacheData = fs.readFileSync(cachePath, 'utf8');
@@ -135,51 +141,50 @@ if (fs.existsSync(cachePath) && config.clientId) {
   } catch (e) {
     log(`Token cache read failed: ${e.message}`);
   }
-
   if (cacheData) {
-    const refreshToken = extractRefreshToken(cacheData, config.clientId);
-
+    refreshToken = extractRefreshToken(cacheData, config.clientId);
     if (refreshToken) {
-      log(`Found refresh token (${refreshToken.length} chars)`);
-
-      try {
-        const result = await refreshAccessToken(refreshToken, config.clientId, config.tenantId, scopes);
-        process.env.MS365_MCP_OAUTH_TOKEN = result.access_token;
-        currentRefreshToken = result.refresh_token || refreshToken;
-        log(`SUCCESS: Got access token (${result.access_token.length} chars), expires_in: ${result.expires_in}s`);
-
-        // Schedule token refresh every 45 minutes
-        setInterval(async () => {
-          try {
-            const r = await refreshAccessToken(currentRefreshToken, config.clientId, config.tenantId, scopes);
-            process.env.MS365_MCP_OAUTH_TOKEN = r.access_token;
-            currentRefreshToken = r.refresh_token || currentRefreshToken;
-            log(`Token refreshed, expires_in: ${r.expires_in}s`);
-          } catch (e) {
-            log(`Token refresh failed: ${e.message}`);
-          }
-        }, 45 * 60 * 1000);
-      } catch (e) {
-        log(`Token acquisition failed: ${e.message}`);
-        log(`Will fall back to server's device code auth flow`);
-      }
+      log(`Found refresh token from MSAL cache (${refreshToken.length} chars)`);
     } else {
-      log(`No refresh token found in cache for client_id=${config.clientId}`);
-      try {
-        const parsed = JSON.parse(cacheData);
-        log(`Cache keys: ${Object.keys(parsed).join(', ')}`);
-        const rt = parsed.RefreshToken || {};
-        log(`RefreshToken entries: ${Object.keys(rt).length}`);
-        for (const [k, v] of Object.entries(rt)) {
-          log(`  Key: ${k}, has secret: ${!!v.secret}, client_id: ${v.client_id}`);
-        }
-      } catch (e) {
-        log(`Cache parse failed: ${e.message}`);
-      }
+      log(`No refresh token found in MSAL cache for client_id=${config.clientId}`);
     }
   }
+}
+
+// Fallback: direct refresh token file (from MS365_REFRESH_TOKEN env var via entrypoint)
+if (!refreshToken && fs.existsSync(directRefreshTokenPath)) {
+  try {
+    refreshToken = fs.readFileSync(directRefreshTokenPath, 'utf8').trim();
+    log(`Found refresh token from ${directRefreshTokenPath} (${refreshToken.length} chars)`);
+  } catch (e) {
+    log(`Failed to read ${directRefreshTokenPath}: ${e.message}`);
+  }
+}
+
+if (refreshToken && config.clientId) {
+  try {
+    const result = await refreshAccessToken(refreshToken, config.clientId, config.tenantId, scopes);
+    process.env.MS365_MCP_OAUTH_TOKEN = result.access_token;
+    currentRefreshToken = result.refresh_token || refreshToken;
+    log(`SUCCESS: Got access token (${result.access_token.length} chars), expires_in: ${result.expires_in}s`);
+
+    // Schedule token refresh every 45 minutes
+    setInterval(async () => {
+      try {
+        const r = await refreshAccessToken(currentRefreshToken, config.clientId, config.tenantId, scopes);
+        process.env.MS365_MCP_OAUTH_TOKEN = r.access_token;
+        currentRefreshToken = r.refresh_token || currentRefreshToken;
+        log(`Token refreshed, expires_in: ${r.expires_in}s`);
+      } catch (e) {
+        log(`Token refresh failed: ${e.message}`);
+      }
+    }, 45 * 60 * 1000);
+  } catch (e) {
+    log(`Token acquisition failed: ${e.message}`);
+    log(`Will fall back to server's device code auth flow`);
+  }
 } else {
-  log(`Skipping token pre-acquisition (cacheFile: ${fs.existsSync(cachePath)}, clientId: ${!!config.clientId})`);
+  log(`No refresh token available (MSAL cache: ${fs.existsSync(cachePath)}, direct: ${fs.existsSync(directRefreshTokenPath)}, clientId: ${!!config.clientId})`);
 }
 
 // Patch AuthManager.prototype.getToken BEFORE importing the server.
