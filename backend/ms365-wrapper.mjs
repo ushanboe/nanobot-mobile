@@ -262,12 +262,33 @@ if (typeof AuthManager.prototype.listAccounts === 'function') {
   log('Patched AuthManager.prototype.listAccounts for OAuth mode');
 }
 
-// Patch testLogin so verify-login tool reports success in OAuth mode
+// Patch testLogin so verify-login and login tools work in OAuth mode.
+// CRITICAL: Must return {success: true, ...} object, NOT bare `true`.
+// The login tool checks `loginStatus.success` — if it's undefined (bare true),
+// it falls through to device code flow which fails for personal accounts.
 if (typeof AuthManager.prototype.testLogin === 'function') {
   const originalTestLogin = AuthManager.prototype.testLogin;
   AuthManager.prototype.testLogin = async function () {
     if (this.isOAuthMode && process.env.MS365_MCP_OAUTH_TOKEN) {
-      return true;
+      try {
+        const resp = await fetch('https://graph.microsoft.com/v1.0/me', {
+          headers: { Authorization: `Bearer ${process.env.MS365_MCP_OAUTH_TOKEN}` }
+        });
+        if (resp.ok) {
+          const userData = await resp.json();
+          return {
+            success: true,
+            message: 'Login successful',
+            userData: {
+              displayName: userData.displayName,
+              userPrincipalName: userData.userPrincipalName,
+            }
+          };
+        }
+      } catch (e) {
+        log(`testLogin Graph API check failed: ${e.message}`);
+      }
+      return { success: true, message: 'Login successful (OAuth mode)' };
     }
     return originalTestLogin.call(this);
   };

@@ -205,7 +205,9 @@ fi
 if [ "$MS365_READY" = true ]; then
   EXTRA_INSTRUCTIONS="${EXTRA_INSTRUCTIONS}
       You can access the user's Microsoft 365 account for Outlook email and OneDrive files.
-      When asked about files or documents in their cloud storage, use OneDrive tools to search and retrieve them."
+      You are already logged in - do NOT call the login tool or ask the user to log in.
+      For OneDrive: first call list-drives to get the drive ID, then use that ID with list-folder-files (use driveItemId=root for root folder).
+      For email: use list-mail-messages to search and read Outlook emails."
   EXTRA_AGENT_SERVERS="${EXTRA_AGENT_SERVERS}
       - microsoft365"
   # Use ms365-wrapper.mjs (Node ESM script) which:
