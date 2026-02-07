@@ -5,6 +5,11 @@
 # Ensure HOME is set (needed for ~/.gmail-mcp/ resolution in Gmail MCP server)
 export HOME=/root
 
+# Set NODE_PATH so node -e commands and child processes can resolve globally installed packages.
+# Without this, require.resolve('@softeria/ms-365-mcp-server') fails from /app because
+# Node.js only searches CWD/node_modules upward, not the global install path.
+export NODE_PATH="$(npm root -g)"
+
 # Gmail: write OAuth keys and credentials to ~/.gmail-mcp/
 # The Gmail MCP server (@gongrzhe/server-gmail-autoauth-mcp) reads:
 #   ~/.gmail-mcp/gcp-oauth.keys.json  - OAuth client keys from Google Cloud Console
