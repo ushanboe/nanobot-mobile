@@ -3,31 +3,29 @@
  * Wrapper for @softeria/ms-365-mcp-server that writes the token cache
  * from environment variables BEFORE importing the server.
  *
- * This ensures the cache is at the exact path the server's auth.js expects,
- * because we resolve the path using the same import mechanism (import.meta).
+ * Receives the package root via MS365_PKG_ROOT env var (set by entrypoint.sh)
+ * to avoid require.resolve / NODE_PATH issues in child processes.
  */
-import { createRequire } from 'module';
 import fs from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'url';
 
-const require = createRequire(import.meta.url);
-
-// Resolve the actual server package root using the same resolution as import
-let serverEntry;
-try {
-  serverEntry = require.resolve('@softeria/ms-365-mcp-server');
-} catch {
-  console.error('[ms365-wrapper] ERROR: Cannot resolve @softeria/ms-365-mcp-server');
-  process.exit(1);
-}
-
-const pkgRoot = path.resolve(path.dirname(serverEntry), '..');
+// Get package root from env var (set by entrypoint.sh) or try known global path
+const pkgRoot = process.env.MS365_PKG_ROOT || '/usr/local/lib/node_modules/@softeria/ms-365-mcp-server';
+const serverEntry = path.join(pkgRoot, 'dist', 'index.js');
 const cachePath = path.join(pkgRoot, '.token-cache.json');
 const accountPath = path.join(pkgRoot, '.selected-account.json');
 
-console.error(`[ms365-wrapper] Server entry: ${serverEntry}`);
 console.error(`[ms365-wrapper] Package root: ${pkgRoot}`);
+console.error(`[ms365-wrapper] Server entry: ${serverEntry}`);
 console.error(`[ms365-wrapper] Cache path: ${cachePath}`);
+
+// Verify server entry exists
+if (!fs.existsSync(serverEntry)) {
+  console.error(`[ms365-wrapper] ERROR: Server entry not found at ${serverEntry}`);
+  console.error(`[ms365-wrapper] Package root contents: ${JSON.stringify(fs.existsSync(pkgRoot) ? fs.readdirSync(pkgRoot) : 'DIR NOT FOUND')}`);
+  process.exit(1);
+}
 
 // Write token cache from env var
 if (process.env.MS365_TOKEN_CACHE_JSON) {
@@ -37,10 +35,12 @@ if (process.env.MS365_TOKEN_CACHE_JSON) {
     const data = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
     const accounts = Object.keys(data.Account || {}).length;
     const refreshTokens = Object.keys(data.RefreshToken || {}).length;
-    console.error(`[ms365-wrapper] Token cache: ${fs.statSync(cachePath).size} bytes, ${accounts} account(s), ${refreshTokens} refresh token(s)`);
+    console.error(`[ms365-wrapper] Token cache written: ${fs.statSync(cachePath).size} bytes, ${accounts} account(s), ${refreshTokens} refresh token(s)`);
   } catch (e) {
     console.error(`[ms365-wrapper] WARNING: Token cache JSON invalid: ${e.message}`);
   }
+} else {
+  console.error(`[ms365-wrapper] WARNING: MS365_TOKEN_CACHE_JSON not set`);
 }
 
 // Write selected account from env var
@@ -56,6 +56,6 @@ if (process.env.MS365_SELECTED_ACCOUNT_JSON) {
   }
 }
 
-// Import and run the actual server
+// Import and run the actual server using file:// URL (required for ESM imports)
 console.error(`[ms365-wrapper] Starting server...`);
-await import(serverEntry);
+await import(pathToFileURL(serverEntry).href);

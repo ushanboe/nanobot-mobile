@@ -44,7 +44,7 @@ if [ -n "$MS365_MCP_CLIENT_ID" ] && [ -n "$MS365_MCP_CLIENT_SECRET" ]; then
   # We use `node <entry>` instead of `npx -y` to run the server, because npx
   # may create a cached copy in a DIFFERENT directory. The server's auth.js
   # uses import.meta.url to find .token-cache.json relative to its own location.
-  MS365_PKG_ROOT="$(npm root -g)/@softeria/ms-365-mcp-server"
+  export MS365_PKG_ROOT="$(npm root -g)/@softeria/ms-365-mcp-server"
   if [ -f "$MS365_PKG_ROOT/dist/index.js" ]; then
     MS365_ENTRY="$MS365_PKG_ROOT/dist/index.js"
     echo "  MS365 entry: $MS365_ENTRY"
