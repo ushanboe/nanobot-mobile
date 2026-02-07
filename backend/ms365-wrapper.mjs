@@ -304,8 +304,19 @@ const graphModule = await import(pathToFileURL(path.join(pkgRoot, 'dist', 'graph
 const GraphClient = graphModule.default;
 const originalMakeRequest = GraphClient.prototype.makeRequest;
 GraphClient.prototype.makeRequest = async function (endpoint, options = {}) {
-  const result = await originalMakeRequest.call(this, endpoint, options);
-  if (endpoint === '/me/drives' && result && result.value && Array.isArray(result.value)) {
+  // Strip $count from /me/drives requests — GPT-4o passes count:true but
+  // Microsoft's /me/drives endpoint doesn't support $count, returning 400.
+  let cleanEndpoint = endpoint;
+  if (endpoint.startsWith('/me/drives')) {
+    cleanEndpoint = endpoint
+      .replace(/[?&]\$count=[^&]*/g, '')
+      .replace(/\?$/, '');
+    if (cleanEndpoint !== endpoint) {
+      log(`Stripped unsupported params from /me/drives: "${endpoint}" → "${cleanEndpoint}"`);
+    }
+  }
+  const result = await originalMakeRequest.call(this, cleanEndpoint, options);
+  if (cleanEndpoint === '/me/drives' && result && result.value && Array.isArray(result.value)) {
     const before = result.value.length;
     const filtered = result.value.filter(drive =>
       drive.driveType === 'personal' || drive.name === 'OneDrive'
