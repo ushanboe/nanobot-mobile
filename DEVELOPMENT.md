@@ -76,6 +76,7 @@ nanobot-mobile/
 │   ├── nanobot.yaml            # Nanobot configuration (agents + MCP servers)
 │   ├── setup-gmail-token.js    # Local helper: auto-redirect OAuth flow (needs localhost)
 │   ├── setup-gmail-manual.js   # Local helper: manual code-paste OAuth flow (WSL-friendly)
+│   ├── setup-ms365-token.js    # Local helper: MS365 device code login + token cache export
 │   ├── .env.example            # Environment variable template
 │   └── railway.toml            # Railway deployment config (only config file - no railway.json)
 │
@@ -232,13 +233,24 @@ mcpServers:
 
 **Dynamic config generation** (`entrypoint.sh`):
 - Exports `HOME=/root` so the Gmail MCP server's `os.homedir()` resolves correctly
+- **Injects today's date** (`$(date -u +"%Y-%m-%d")`) into AI instructions so GPT-4o knows the current date for relative queries like "yesterday's emails"
 - Checks `GMAIL_OAUTH_KEYS_JSON` + `GMAIL_CREDENTIALS_JSON` — if both set:
   - Writes OAuth keys to `/root/.gmail-mcp/gcp-oauth.keys.json`
   - Writes token credentials to `/root/.gmail-mcp/credentials.json`
   - Uses `printf '%s'` (not `echo`) to avoid mangling JSON special characters
   - Validates that `refresh_token` is present in the credentials (logs warning if missing)
   - Includes gmail MCP server in generated config
-- Checks `MS365_MCP_CLIENT_ID` + `MS365_MCP_CLIENT_SECRET` — if both set, includes microsoft365 MCP server
+- Checks `MS365_MCP_CLIENT_ID` + `MS365_MCP_CLIENT_SECRET` — if both set:
+  - Includes microsoft365 MCP server in generated config
+  - **Pre-seeds MS365 token cache** from `MS365_TOKEN_CACHE_JSON` env var (avoids device code login on every deploy):
+    - Finds the `@softeria/ms-365-mcp-server` package root via `npm root -g`
+    - Writes token cache to `<package-root>/.token-cache.json`
+    - Validates the JSON is parseable
+  - **Pre-seeds selected account** from `MS365_SELECTED_ACCOUNT_JSON` env var:
+    - Transforms format if needed: server expects `{"accountId":"..."}` not `{"homeAccountId":"..."}`
+    - Writes to `<package-root>/.selected-account.json`
+  - Logs diagnostic info: npm root path, package dir existence, file sizes, JSON validity
+- **Email service routing**: When both Gmail and MS365 are configured, the AI is explicitly instructed to ONLY use Gmail tools for Gmail requests and ONLY use MS365 tools for Outlook/Microsoft requests — never falling back from one to the other
 - Generates `nanobot.yaml` with only the available servers, preventing "failed to build tool mappings" crashes
 - Logs file sizes and credential validation results for debugging
 
@@ -287,7 +299,9 @@ Remote servers are free and require no API keys. Local servers (Gmail, MS365) ru
 | `GMAIL_CREDENTIALS_JSON` | Gmail OAuth **tokens** (must have `refresh_token`!) | Run `node setup-gmail-manual.js` locally (see below) |
 | `MS365_MCP_CLIENT_ID` | Azure app client ID | Azure Portal > App Registrations |
 | `MS365_MCP_CLIENT_SECRET` | Azure app client secret | Azure Portal > Certificates & secrets |
-| `MS365_MCP_TENANT_ID` | Azure tenant ID (use `common` for personal) | Azure Portal > App Registrations > Overview |
+| `MS365_MCP_TENANT_ID` | Azure tenant ID (use `common` for personal accounts) | Azure Portal > App Registrations > Overview |
+| `MS365_TOKEN_CACHE_JSON` | MSAL token cache (avoids device code on redeploy) | Run `node setup-ms365-token.js` locally (see below) |
+| `MS365_SELECTED_ACCOUNT_JSON` | Selected account for auto-login | Run `node setup-ms365-token.js` locally (see below) |
 
 **CRITICAL: `GMAIL_CREDENTIALS_JSON` format**
 
@@ -350,26 +364,74 @@ Copy the token JSON output from the script and set it as `GMAIL_CREDENTIALS_JSON
 
 #### Microsoft 365 Setup (Outlook + OneDrive)
 
+**Step 1: Create Azure AD app registration**
+
 1. Go to [Azure Portal](https://portal.azure.com/) > **App Registrations** > **New registration**
+   - Name: anything (e.g., "nanobot-mobile")
+   - Supported account types: **Personal Microsoft accounts only** (or "Accounts in any organizational directory and personal Microsoft accounts" for both)
+   - Redirect URI: leave blank for now
 2. Note the **Application (client) ID** and **Directory (tenant) ID**
-3. Go to **Certificates & secrets** > create a new **Client secret**
-4. Go to **API permissions** > Add permissions:
+
+**Step 2: Configure for device code flow (CRITICAL)**
+
+The `@softeria/ms-365-mcp-server` uses **device code flow** which requires specific Azure AD configuration:
+
+3. Go to **Authentication** > **Add a platform** > **Mobile and desktop applications**
+   - Check the redirect URI: `https://login.microsoftonline.com/common/oauth2/nativeclient`
+   - Save
+4. **CRITICAL**: Go to **Manifest** tab > find `"isFallbackPublicClient"` > set to `true` > Save
+   - Without this, device code flow fails with: `AADSTS70002: The client application must be marked as 'mobile'`
+   - The "Allow public client flows" toggle in Authentication UI doesn't always persist — verify in the raw manifest
+
+**Step 3: Add API permissions**
+
+5. Go to **API permissions** > **Add a permission** > **Microsoft Graph** > **Delegated permissions**:
+   - `User.Read` (basic profile)
    - `Mail.Read`, `Mail.Send` (for Outlook email)
    - `Files.Read`, `Files.ReadWrite` (for OneDrive)
-   - `User.Read` (basic profile)
-5. **Grant admin consent** (or let user consent on first use)
-6. Set in Railway environment variables:
+   - `offline_access` (for refresh tokens)
+6. **Grant admin consent** (or let user consent on first use)
+
+**Step 4: Create client secret**
+
+7. Go to **Certificates & secrets** > create a new **Client secret** > copy the Value (not the Secret ID)
+
+**Step 5: Set Railway environment variables**
+
+8. Set in Railway:
    - `MS365_MCP_CLIENT_ID` = Application (client) ID
    - `MS365_MCP_CLIENT_SECRET` = Client secret value
-   - `MS365_MCP_TENANT_ID` = `common` (for personal Microsoft accounts)
+   - `MS365_MCP_TENANT_ID` = `common` (use `common` for personal Microsoft accounts like @gmail.com, @outlook.com)
 
-**MS365 authentication flow:**
-- Uses **device code flow** (like signing into a TV) — no browser redirect needed
-- On first chat request that uses MS365 tools, the AI will display a URL (`https://microsoft.com/devicelogin`) and a code
-- User visits the URL on any device, enters the code, and signs in with their Microsoft account
-- The `@softeria/ms-365-mcp-server` caches tokens in a file on the container filesystem
-- **Limitation**: Railway's filesystem is ephemeral — tokens are lost on every redeploy, requiring re-login
-- This is acceptable for now; see Troubleshooting issue #16 for workaround options
+**Step 6: Generate token cache (avoids device code login on every deploy)**
+
+Without this step, users must complete device code login every time Railway redeploys (ephemeral filesystem). The setup script performs a one-time device code login and exports the MSAL token cache:
+
+```bash
+cd backend
+npm install @azure/msal-node  # One-time dependency
+MS365_MCP_CLIENT_ID=your-client-id node setup-ms365-token.js
+# 1. Script displays a URL and code
+# 2. Open https://microsoft.com/devicelogin in browser
+# 3. Enter the code and sign in with your Microsoft account
+# 4. Script outputs MS365_TOKEN_CACHE_JSON and MS365_SELECTED_ACCOUNT_JSON
+# 5. Set both as Railway environment variables
+```
+
+**Important notes:**
+- Use **InPrivate/Incognito** browser window for device code login to avoid cached account issues
+- If you get `AADSTS50020` (wrong account type), ensure `MS365_MCP_TENANT_ID=common` and app supports personal accounts
+- Device codes expire in ~15 minutes — complete login promptly
+- Refresh tokens last ~90 days. After expiry, re-run `setup-ms365-token.js`
+- The token cache JSON contains `!`, `*`, `$` characters — ensure Railway doesn't shell-expand them (paste via the UI, not CLI)
+
+**MS365 MCP server internals** (`@softeria/ms-365-mcp-server`):
+- Always uses `PublicClientApplication` from MSAL (regardless of whether client secret is set)
+- Token cache stored at `<npm-global-root>/@softeria/ms-365-mcp-server/.token-cache.json` (file fallback when keytar is unavailable in Docker)
+- Selected account stored at `<npm-global-root>/@softeria/ms-365-mcp-server/.selected-account.json`
+- Selected account format: `{"accountId": "homeAccountId-value"}` — NOT `{"homeAccountId": "..."}`
+- `getToken()` calls `acquireTokenSilent()` which uses the refresh token to get new access tokens
+- If token cache is empty (no accounts), throws "No valid token found" — this means pre-seeding failed
 
 ### Railway Deployment Steps
 
@@ -987,12 +1049,62 @@ The entrypoint logs "refresh_token: present" or "WARNING: no refresh_token" to h
 
 **Cause**: The `@softeria/ms-365-mcp-server` caches OAuth tokens in a file on disk. Railway's filesystem is **ephemeral** — all files are lost on container restart/redeploy. The token cache is destroyed, requiring re-authentication.
 
-**Current behavior**: This is expected. The device code flow is the default auth method for stdio mode. On first chat request involving MS365 tools, the AI will present a device code URL. The user completes login once per container lifecycle.
+**Solution (implemented)**: Token cache pre-seeding via environment variables:
+1. Run `node setup-ms365-token.js` locally to complete device code login once
+2. Set `MS365_TOKEN_CACHE_JSON` and `MS365_SELECTED_ACCOUNT_JSON` in Railway env vars
+3. `entrypoint.sh` writes these to the correct filesystem paths on container startup
+4. The ms-365-mcp-server reads the pre-seeded cache and uses the refresh token for silent auth
 
-**Workarounds** (not yet implemented):
-- **Railway Volumes**: Mount persistent storage at the MSAL token cache path
-- **BYOT mode**: Set `MS365_MCP_OAUTH_TOKEN` env var with a pre-authenticated access token (requires external refresh management since tokens expire in ~1 hour)
-- **Pre-authenticate locally**: Run `npx @softeria/ms-365-mcp-server --login` locally, extract the token cache, and bake it into the container. Refresh tokens last ~90 days.
+**Key paths** (determined by `npm root -g`):
+- Token cache: `<npm-global-root>/@softeria/ms-365-mcp-server/.token-cache.json`
+- Selected account: `<npm-global-root>/@softeria/ms-365-mcp-server/.selected-account.json`
+
+**If still failing ("No valid token found")**:
+- Check Railway deploy logs for diagnostic output (npm root path, package dir existence, JSON validity)
+- Verify the token cache JSON is valid: should contain Account, IdToken, AccessToken, RefreshToken sections
+- Verify selected account format is `{"accountId":"..."}` not `{"homeAccountId":"..."}`
+- Refresh tokens expire after ~90 days — re-run `setup-ms365-token.js` if expired
+
+### 18. Azure AD Error: AADSTS70002 "client application must be marked as mobile"
+
+**Error**: `post_request_failed: invalid_grant` or `AADSTS70002: The request body must contain the following parameter: 'client_assertion' or 'client_secret'. The client application must be marked as 'mobile'`
+
+**Cause**: Azure AD app registration is not configured for public client / device code flow.
+
+**Solution**:
+1. Azure Portal > App Registration > **Authentication** > **Add a platform** > **Mobile and desktop applications**
+2. Check the redirect URI: `https://login.microsoftonline.com/common/oauth2/nativeclient`
+3. Go to **Manifest** tab > set `"isFallbackPublicClient": true` > Save
+4. The "Allow public client flows" toggle in the UI may not persist — always verify in the raw manifest
+
+### 19. Azure AD Error: AADSTS50020 Wrong Account Type
+
+**Error**: `AADSTS50020: User account from identity provider 'live.com' does not exist in tenant`
+
+**Cause**: Trying to log in with a personal Microsoft account (e.g., @gmail.com, @outlook.com) but the tenant ID is set to a specific organization tenant instead of `common`.
+
+**Solution**:
+- Set `MS365_MCP_TENANT_ID=common` in Railway env vars
+- In `setup-ms365-token.js`, ensure tenant is `common`
+- Use InPrivate/Incognito browser to avoid cached organizational account sessions
+
+### 20. AI Returns Wrong Dates for "Yesterday" Email Queries
+
+**Error**: Asking "retrieve emails from yesterday" returns emails from October 2023 or other wrong dates.
+
+**Cause**: GPT-4o running through nanobot has no inherent knowledge of the current date. When asked about "yesterday", it guesses based on training data.
+
+**Solution (implemented)**: `entrypoint.sh` injects `Today's date is YYYY-MM-DD` into the AI system instructions using `$(date -u +"%Y-%m-%d")`. This is regenerated on every container start, so it's always current.
+
+### 21. AI Falls Back to MS365 When Gmail Requested (or Vice Versa)
+
+**Error**: User asks "check my Gmail" but AI uses Microsoft 365 tools instead (or vice versa), especially when one service has auth errors.
+
+**Cause**: Generic instructions like "use the appropriate email tools" let GPT-4o fall back to whichever service is available.
+
+**Solution (implemented)**: Explicit routing instructions in `entrypoint.sh`:
+- When both services are configured: "When the user mentions 'Gmail', ONLY use Gmail tools. When the user mentions 'Outlook' or 'Microsoft', ONLY use Microsoft 365 tools. Never fall back to one email service when the other fails."
+- When only one service is configured: Instructions direct the AI to only use that service and report auth errors instead of trying alternatives.
 
 ---
 
@@ -1167,6 +1279,10 @@ For the AI to proactively use device sensors (camera, GPS), several architectura
 - ~~Gmail OAuth Setup Scripts~~: `setup-gmail-token.js` (auto-redirect) and `setup-gmail-manual.js` (manual code paste)
 - ~~Entrypoint Hardening~~: printf instead of echo for JSON, HOME=/root export, refresh_token validation logging
 - ~~Railway Config Cleanup~~: Removed conflicting railway.json, only railway.toml remains
+- ~~Date Awareness~~: AI instructions include today's date via `$(date -u)` in entrypoint.sh — fixes "yesterday" queries returning wrong dates
+- ~~Email Service Routing~~: Explicit instructions prevent AI from falling back between Gmail and MS365
+- ~~MS365 Token Persistence~~: Token cache pre-seeded from Railway env vars via entrypoint.sh — avoids device code login on redeploy
+- ~~MS365 Setup Script~~: `setup-ms365-token.js` performs device code login and exports token cache + selected account JSON
 
 ---
 

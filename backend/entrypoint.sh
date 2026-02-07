@@ -30,18 +30,32 @@ fi
 
 # MS365: env vars read by ms-365-mcp-server + optional pre-seeded token cache
 MS365_READY=false
+MS365_ENTRY=""
 if [ -n "$MS365_MCP_CLIENT_ID" ] && [ -n "$MS365_MCP_CLIENT_SECRET" ]; then
   MS365_READY=true
   echo "MS365 credentials configured (client_id and client_secret set)"
 
+  # Resolve the actual ms-365-mcp-server entry point and package root.
+  # CRITICAL: We must use `node <entry>` instead of `npx -y` to run the server,
+  # because npx may create a cached copy in a DIFFERENT directory. The server's
+  # auth.js uses import.meta.url to find .token-cache.json relative to its own
+  # location, so the pre-seeded cache must be in the same directory tree.
+  MS365_ENTRY=$(node -e "try{console.log(require.resolve('@softeria/ms-365-mcp-server'))}catch(e){}" 2>/dev/null)
+  if [ -n "$MS365_ENTRY" ]; then
+    # Entry is like .../dist/index.js → package root is parent of dist/
+    MS365_PKG_ROOT=$(node -e "const p=require('path');console.log(p.resolve(p.dirname(require.resolve('@softeria/ms-365-mcp-server')),'..'))" 2>/dev/null)
+    echo "  MS365 entry: $MS365_ENTRY"
+    echo "  MS365 package root (resolved): $MS365_PKG_ROOT"
+  else
+    MS365_PKG_ROOT="$(npm root -g)/@softeria/ms-365-mcp-server"
+    echo "  WARNING: Could not resolve ms-365-mcp-server, falling back to npm root: $MS365_PKG_ROOT"
+  fi
+  echo "  Package dir exists: $([ -d "$MS365_PKG_ROOT" ] && echo yes || echo no)"
+  echo "  dist dir exists: $([ -d "$MS365_PKG_ROOT/dist" ] && echo yes || echo no)"
+
   # Pre-seed MSAL token cache if provided (avoids device code login on every deploy)
   # The ms-365-mcp-server stores its token cache at <package-root>/.token-cache.json
   if [ -n "$MS365_TOKEN_CACHE_JSON" ]; then
-    MS365_PKG_ROOT="$(npm root -g)/@softeria/ms-365-mcp-server"
-    echo "  npm root -g: $(npm root -g)"
-    echo "  MS365 package root: $MS365_PKG_ROOT"
-    echo "  Package dir exists: $([ -d "$MS365_PKG_ROOT" ] && echo yes || echo no)"
-    echo "  dist dir exists: $([ -d "$MS365_PKG_ROOT/dist" ] && echo yes || echo no)"
     if [ -d "$MS365_PKG_ROOT" ]; then
       printf '%s' "$MS365_TOKEN_CACHE_JSON" > "$MS365_PKG_ROOT/.token-cache.json"
       chmod 600 "$MS365_PKG_ROOT/.token-cache.json"
@@ -63,7 +77,6 @@ if [ -n "$MS365_MCP_CLIENT_ID" ] && [ -n "$MS365_MCP_CLIENT_SECRET" ]; then
 
   # Pre-seed selected account if provided
   if [ -n "$MS365_SELECTED_ACCOUNT_JSON" ]; then
-    MS365_PKG_ROOT="${MS365_PKG_ROOT:-$(npm root -g)/@softeria/ms-365-mcp-server}"
     if [ -d "$MS365_PKG_ROOT" ]; then
       # Transform format if needed: server expects {"accountId":"..."} not {"homeAccountId":"..."}
       ACCOUNT_ID=$(echo "$MS365_SELECTED_ACCOUNT_JSON" | node -e "
@@ -103,10 +116,19 @@ if [ "$MS365_READY" = true ]; then
       When asked about files or documents in their cloud storage, use OneDrive tools to search and retrieve them."
   EXTRA_AGENT_SERVERS="${EXTRA_AGENT_SERVERS}
       - microsoft365"
-  EXTRA_MCP_SERVERS="${EXTRA_MCP_SERVERS}
+  # Use resolved entry point (node <path>) instead of npx to ensure import.meta.url
+  # matches the directory where we pre-seeded the token cache
+  if [ -n "$MS365_ENTRY" ]; then
+    EXTRA_MCP_SERVERS="${EXTRA_MCP_SERVERS}
+  microsoft365:
+    command: node
+    args: [\"$MS365_ENTRY\"]"
+  else
+    EXTRA_MCP_SERVERS="${EXTRA_MCP_SERVERS}
   microsoft365:
     command: npx
     args: [\"-y\", \"@softeria/ms-365-mcp-server\"]"
+  fi
 fi
 
 if [ "$GMAIL_READY" = true ] && [ "$MS365_READY" = true ]; then
