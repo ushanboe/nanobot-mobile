@@ -45,13 +45,36 @@ if (config.nodePath) process.env.NODE_PATH = config.nodePath;
 
 const pkgRoot = config.pkgRoot;
 const serverEntry = path.join(pkgRoot, 'dist', 'index.js');
-const cachePath = path.join(pkgRoot, '.token-cache.json');
-const accountPath = path.join(pkgRoot, '.selected-account.json');
+
+// Check primary and fallback paths for token cache and selected account
+const cachePrimary = path.join(pkgRoot, '.token-cache.json');
+const cacheFallback = '/app/.ms365-token-cache.json';
+const accountPrimary = path.join(pkgRoot, '.selected-account.json');
+const accountFallback = '/app/.ms365-selected-account.json';
+
+const cachePath = fs.existsSync(cachePrimary) ? cachePrimary
+  : fs.existsSync(cacheFallback) ? cacheFallback : cachePrimary;
+const accountPath = fs.existsSync(accountPrimary) ? accountPrimary
+  : fs.existsSync(accountFallback) ? accountFallback : accountPrimary;
 
 log(`Package root: ${pkgRoot}`);
 log(`Server entry: ${serverEntry}`);
-log(`Token cache file exists: ${fs.existsSync(cachePath)}`);
-log(`Selected account file exists: ${fs.existsSync(accountPath)}`);
+log(`Token cache: primary=${fs.existsSync(cachePrimary)}, fallback=${fs.existsSync(cacheFallback)}, using=${cachePath}`);
+log(`Selected account: primary=${fs.existsSync(accountPrimary)}, fallback=${fs.existsSync(accountFallback)}, using=${accountPath}`);
+
+// If using fallback, also copy to primary so the server's MSAL finds it
+if (cachePath === cacheFallback && fs.existsSync(cacheFallback)) {
+  try {
+    fs.copyFileSync(cacheFallback, cachePrimary);
+    log(`Copied fallback cache to ${cachePrimary}`);
+  } catch (e) { log(`Failed to copy cache to primary: ${e.message}`); }
+}
+if (accountPath === accountFallback && fs.existsSync(accountFallback)) {
+  try {
+    fs.copyFileSync(accountFallback, accountPrimary);
+    log(`Copied fallback account to ${accountPrimary}`);
+  } catch (e) { log(`Failed to copy account to primary: ${e.message}`); }
+}
 
 if (!fs.existsSync(serverEntry)) {
   log(`ERROR: Server entry not found at ${serverEntry}`);

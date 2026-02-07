@@ -58,8 +58,14 @@ if [ -n "$MS365_MCP_CLIENT_ID" ] && [ -n "$MS365_MCP_CLIENT_SECRET" ]; then
   echo "  dist dir exists: $([ -d "$MS365_PKG_ROOT/dist" ] && echo yes || echo no)"
 
   # Pre-seed MSAL token cache if provided (avoids device code login on every deploy)
-  # The ms-365-mcp-server stores its token cache at <package-root>/.token-cache.json
+  # Write to BOTH the package root (for server's own MSAL) AND /app/ (fallback for wrapper)
+  CACHE_LEN=$(printf '%s' "$MS365_TOKEN_CACHE_JSON" | wc -c)
+  echo "  MS365_TOKEN_CACHE_JSON env var: ${CACHE_LEN} chars"
   if [ -n "$MS365_TOKEN_CACHE_JSON" ]; then
+    # Always write to /app/ as fallback (wrapper checks here if pkg root copy missing)
+    printf '%s' "$MS365_TOKEN_CACHE_JSON" > /app/.ms365-token-cache.json
+    chmod 600 /app/.ms365-token-cache.json
+    echo "  Fallback cache written: /app/.ms365-token-cache.json ($(wc -c < /app/.ms365-token-cache.json) bytes)"
     if [ -d "$MS365_PKG_ROOT" ]; then
       printf '%s' "$MS365_TOKEN_CACHE_JSON" > "$MS365_PKG_ROOT/.token-cache.json"
       chmod 600 "$MS365_PKG_ROOT/.token-cache.json"
@@ -71,7 +77,7 @@ if [ -n "$MS365_MCP_CLIENT_ID" ] && [ -n "$MS365_MCP_CLIENT_SECRET" ]; then
         echo "  WARNING: Token cache JSON is invalid!"
       fi
     else
-      echo "  WARNING: MS365 package not found at $MS365_PKG_ROOT"
+      echo "  WARNING: MS365 package not found at $MS365_PKG_ROOT — using fallback path only"
       echo "  Listing global packages:"
       ls "$(npm root -g)/" 2>/dev/null || echo "    (failed to list)"
     fi
@@ -154,17 +160,18 @@ if [ -n "$MS365_MCP_CLIENT_ID" ] && [ -n "$MS365_MCP_CLIENT_SECRET" ]; then
 
   # Pre-seed selected account if provided
   if [ -n "$MS365_SELECTED_ACCOUNT_JSON" ]; then
+    # Transform format if needed: server expects {"accountId":"..."} not {"homeAccountId":"..."}
+    ACCOUNT_ID=$(echo "$MS365_SELECTED_ACCOUNT_JSON" | node -e "
+      const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+      process.stdout.write(JSON.stringify({accountId: d.accountId || d.homeAccountId}));
+    " 2>/dev/null)
+    ACCOUNT_DATA="${ACCOUNT_ID:-$MS365_SELECTED_ACCOUNT_JSON}"
+    # Write to /app/ as fallback
+    printf '%s' "$ACCOUNT_DATA" > /app/.ms365-selected-account.json
+    chmod 600 /app/.ms365-selected-account.json
+    echo "  Fallback selected account written: /app/.ms365-selected-account.json"
     if [ -d "$MS365_PKG_ROOT" ]; then
-      # Transform format if needed: server expects {"accountId":"..."} not {"homeAccountId":"..."}
-      ACCOUNT_ID=$(echo "$MS365_SELECTED_ACCOUNT_JSON" | node -e "
-        const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
-        process.stdout.write(JSON.stringify({accountId: d.accountId || d.homeAccountId}));
-      " 2>/dev/null)
-      if [ -n "$ACCOUNT_ID" ]; then
-        printf '%s' "$ACCOUNT_ID" > "$MS365_PKG_ROOT/.selected-account.json"
-      else
-        printf '%s' "$MS365_SELECTED_ACCOUNT_JSON" > "$MS365_PKG_ROOT/.selected-account.json"
-      fi
+      printf '%s' "$ACCOUNT_DATA" > "$MS365_PKG_ROOT/.selected-account.json"
       chmod 600 "$MS365_PKG_ROOT/.selected-account.json"
       echo "  Selected account written: $(cat "$MS365_PKG_ROOT/.selected-account.json")"
     fi
