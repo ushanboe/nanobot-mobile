@@ -304,15 +304,32 @@ const graphModule = await import(pathToFileURL(path.join(pkgRoot, 'dist', 'graph
 const GraphClient = graphModule.default;
 const originalMakeRequest = GraphClient.prototype.makeRequest;
 GraphClient.prototype.makeRequest = async function (endpoint, options = {}) {
-  // Strip ALL query params from /me/drives requests — GPT-4o adds various OData
-  // params ($count, $skip, $top, etc.) but Microsoft's /me/drives endpoint doesn't
-  // support any of them, returning 400. This endpoint just lists drives, no params needed.
-  // Only strip from exact /me/drives, not sub-paths like /me/drives/{id}/items/...
+  // GPT-4o adds $count to many requests but personal OneDrive endpoints reject it.
+  // Strip $count from ALL requests globally — it's never critical (just adds a count
+  // annotation to responses). Also strip ALL params from exact /me/drives.
   let cleanEndpoint = endpoint;
+
+  // 1. Strip ALL query params from exact /me/drives (no OData params supported at all)
   if (endpoint === '/me/drives' || endpoint.startsWith('/me/drives?')) {
     cleanEndpoint = '/me/drives';
     if (cleanEndpoint !== endpoint) {
       log(`Stripped all query params from /me/drives: "${endpoint}" → "${cleanEndpoint}"`);
+    }
+  }
+  // 2. Strip $count and $skip from ALL other requests (personal OneDrive rejects these)
+  //    Keep $top, $select, $filter, $expand — those are generally supported.
+  //    Note: graph-tools.js URL-encodes param names, so $count → %24count
+  else if (endpoint.includes('?')) {
+    const [pathPart, queryPart] = endpoint.split('?');
+    if (queryPart) {
+      const filtered = queryPart.split('&').filter(p => {
+        const key = decodeURIComponent(p.split('=')[0]);
+        return key !== '$count' && key !== '$skip';
+      });
+      cleanEndpoint = filtered.length > 0 ? pathPart + '?' + filtered.join('&') : pathPart;
+    }
+    if (cleanEndpoint !== endpoint) {
+      log(`Stripped $count/$skip from request: "${endpoint}" → "${cleanEndpoint}"`);
     }
   }
   const result = await originalMakeRequest.call(this, cleanEndpoint, options);
