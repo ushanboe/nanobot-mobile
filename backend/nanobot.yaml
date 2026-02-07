@@ -9,7 +9,7 @@ agents:
       When asked about a GitHub project, use DeepWiki to look up its documentation.
       You can access the user's Gmail to search, read, and send emails.
       You can access the user's Microsoft 365 account for Outlook email and OneDrive files.
-      When asked about emails, use the appropriate Gmail or Outlook tools.
+      IMPORTANT: When the user mentions 'Gmail', ONLY use Gmail tools. When the user mentions 'Outlook' or 'Microsoft', ONLY use Microsoft 365 tools. Never fall back to one email service when the other fails - instead tell the user there was an authentication error.
       When asked about files or documents in their cloud storage, use OneDrive tools to search and retrieve them.
     mcpServers:
       - search

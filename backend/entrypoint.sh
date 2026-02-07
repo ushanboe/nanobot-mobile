@@ -66,9 +66,15 @@ if [ "$MS365_READY" = true ]; then
     args: [\"-y\", \"@softeria/ms-365-mcp-server\"]"
 fi
 
-if [ "$GMAIL_READY" = true ] || [ "$MS365_READY" = true ]; then
+if [ "$GMAIL_READY" = true ] && [ "$MS365_READY" = true ]; then
   EXTRA_INSTRUCTIONS="${EXTRA_INSTRUCTIONS}
-      When asked about emails, use the appropriate Gmail or Outlook tools."
+      IMPORTANT: When the user mentions 'Gmail', ONLY use Gmail tools. When the user mentions 'Outlook' or 'Microsoft', ONLY use Microsoft 365 tools. Never fall back to one email service when the other fails - instead tell the user there was an authentication error."
+elif [ "$GMAIL_READY" = true ]; then
+  EXTRA_INSTRUCTIONS="${EXTRA_INSTRUCTIONS}
+      Use Gmail tools when the user asks about emails. If Gmail tools fail with auth errors, tell the user their Gmail credentials need to be updated - do NOT try other tools."
+elif [ "$MS365_READY" = true ]; then
+  EXTRA_INSTRUCTIONS="${EXTRA_INSTRUCTIONS}
+      Use Microsoft 365 tools when the user asks about emails. If the tools require login, provide the device code login instructions."
 fi
 
 cat > /app/nanobot.yaml << YAML
