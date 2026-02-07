@@ -74,9 +74,10 @@ nanobot-mobile/
 │   ├── Dockerfile              # Docker build for Railway (includes Node.js + MCP packages)
 │   ├── entrypoint.sh           # Startup script (writes OAuth creds from env vars)
 │   ├── nanobot.yaml            # Nanobot configuration (agents + MCP servers)
-│   ├── setup-gmail-token.js    # Local helper to obtain Gmail OAuth refresh token
+│   ├── setup-gmail-token.js    # Local helper: auto-redirect OAuth flow (needs localhost)
+│   ├── setup-gmail-manual.js   # Local helper: manual code-paste OAuth flow (WSL-friendly)
 │   ├── .env.example            # Environment variable template
-│   └── railway.toml            # Railway deployment config
+│   └── railway.toml            # Railway deployment config (only config file - no railway.json)
 │
 ├── mobile/                     # React Native Expo app
 │   ├── android/                # Native Android project (prebuild)
@@ -137,6 +138,13 @@ RUN apk add --no-cache git nodejs npm
 WORKDIR /app
 # Pinned to v0.0.55 — has chat-with-* multi-tool support, 10MB bufio buffer, --config flag
 RUN git clone --branch v0.0.55 --depth 1 https://github.com/nanobot-ai/nanobot.git .
+
+# Patch: increase bufio scanner buffer in LLM SSE readers (upstream bug — default 64KB overflows)
+# The 10MB buffer in pkg/mcp/stdio.go only covers MCP stdio; the LLM SSE readers have no override.
+# Insert lines.Buffer() call before each "for lines.Scan()" loop in the 3 affected files:
+RUN sed -i '/for lines.Scan()/i\\tlines.Buffer(make([]byte, 0, 1024), 10*1024*1024)' \
+    pkg/llm/completions/client.go pkg/llm/anthropic/client.go pkg/llm/responses/progress.go
+
 # UI disabled so go generate not needed — .dist placeholder satisfies embed
 RUN go build -o nanobot .
 
@@ -154,11 +162,15 @@ ENTRYPOINT ["./entrypoint.sh"]
 
 **Key details**:
 - Nanobot pinned to **v0.0.55** (see Version Notes below for why)
+- **Bufio patch**: 3 LLM SSE reader files have their `bufio.Scanner` buffer increased from 64KB to 10MB. Without this, long AI responses cause `bufio.Scanner: token too long` errors. The patch uses `sed` to insert `lines.Buffer()` before each `for lines.Scan()` loop.
 - Production image includes `nodejs npm` for running MCP server subprocesses
-- Gmail and MS365 MCP packages are pre-installed globally
+- Gmail and MS365 MCP packages are pre-installed globally via `npm install -g`
 - `entrypoint.sh` dynamically generates `nanobot.yaml` based on available credentials
+- `entrypoint.sh` writes Gmail OAuth credentials to `/root/.gmail-mcp/` using `printf` (not `echo`, to avoid JSON mangling)
+- `entrypoint.sh` exports `HOME=/root` explicitly for Gmail MCP server's `os.homedir()` resolution
 - `--disable-ui` flag prevents nanobot from starting its built-in web UI
 - `--config ./nanobot.yaml` must use `./` prefix (required since v0.0.51)
+- **Only `railway.toml` is used** for Railway config. Do NOT add `railway.json` — it conflicts with the Dockerfile ENTRYPOINT (its `startCommand` overrides Docker's entrypoint, and `healthcheckPath` points to a non-existent endpoint)
 
 **Nanobot Version Notes**:
 | Version | Tool Name | `--config` | Bufio Buffer | Built-in Agents | Notes |
@@ -219,9 +231,25 @@ mcpServers:
 ```
 
 **Dynamic config generation** (`entrypoint.sh`):
-- Checks `GMAIL_OAUTH_KEYS_JSON` + `GMAIL_CREDENTIALS_JSON` — if both set, writes creds to `/root/.gmail-mcp/` and includes gmail MCP server
+- Exports `HOME=/root` so the Gmail MCP server's `os.homedir()` resolves correctly
+- Checks `GMAIL_OAUTH_KEYS_JSON` + `GMAIL_CREDENTIALS_JSON` — if both set:
+  - Writes OAuth keys to `/root/.gmail-mcp/gcp-oauth.keys.json`
+  - Writes token credentials to `/root/.gmail-mcp/credentials.json`
+  - Uses `printf '%s'` (not `echo`) to avoid mangling JSON special characters
+  - Validates that `refresh_token` is present in the credentials (logs warning if missing)
+  - Includes gmail MCP server in generated config
 - Checks `MS365_MCP_CLIENT_ID` + `MS365_MCP_CLIENT_SECRET` — if both set, includes microsoft365 MCP server
 - Generates `nanobot.yaml` with only the available servers, preventing "failed to build tool mappings" crashes
+- Logs file sizes and credential validation results for debugging
+
+**Gmail MCP server internal flow** (`@gongrzhe/server-gmail-autoauth-mcp` v1.1.11):
+1. Reads `~/.gmail-mcp/gcp-oauth.keys.json` — extracts `installed.client_id` and `installed.client_secret`
+2. Creates `OAuth2Client(client_id, client_secret, "http://localhost:3000/oauth2callback")`
+3. If `~/.gmail-mcp/credentials.json` exists, reads it and calls `oauth2Client.setCredentials(credentials)`
+4. Creates Gmail API with the oauth2Client — does NOT validate credentials on startup
+5. When a tool is called, the Google auth library auto-refreshes the access_token using the refresh_token
+6. If refresh fails (invalid/expired token), the tool returns an auth error — the AI then tells the user to log in
+7. The `authenticate()` function (browser-based re-auth) is only triggered if the `auth` CLI argument is passed — it is NOT called during normal MCP server operation
 
 ### MCP Servers
 
@@ -251,41 +279,81 @@ Remote servers are free and require no API keys. Local servers (Gmail, MS365) ru
 
 ### Environment Variables (Railway Dashboard)
 
-| Variable | Description |
-|----------|-------------|
-| `OPENAI_API_KEY` | OpenAI API key (required for OpenAI models) |
-| `ANTHROPIC_API_KEY` | Anthropic API key (required for Claude models) |
-| `GMAIL_OAUTH_KEYS_JSON` | Gmail OAuth client keys (from Google Cloud Console) |
-| `GMAIL_CREDENTIALS_JSON` | Gmail refresh token (from `setup-gmail-token.js`) |
-| `MS365_MCP_CLIENT_ID` | Azure app client ID |
-| `MS365_MCP_CLIENT_SECRET` | Azure app client secret |
-| `MS365_MCP_TENANT_ID` | Azure tenant ID (use `common` for personal accounts) |
+| Variable | Description | How to get it |
+|----------|-------------|---------------|
+| `OPENAI_API_KEY` | OpenAI API key (required for gpt-4o) | [platform.openai.com](https://platform.openai.com/) |
+| `ANTHROPIC_API_KEY` | Anthropic API key (for Claude models) | [console.anthropic.com](https://console.anthropic.com/) |
+| `GMAIL_OAUTH_KEYS_JSON` | Gmail OAuth **client keys** (the `{"installed":{...}}` JSON) | Download from Google Cloud Console > Credentials |
+| `GMAIL_CREDENTIALS_JSON` | Gmail OAuth **tokens** (must have `refresh_token`!) | Run `node setup-gmail-manual.js` locally (see below) |
+| `MS365_MCP_CLIENT_ID` | Azure app client ID | Azure Portal > App Registrations |
+| `MS365_MCP_CLIENT_SECRET` | Azure app client secret | Azure Portal > Certificates & secrets |
+| `MS365_MCP_TENANT_ID` | Azure tenant ID (use `common` for personal) | Azure Portal > App Registrations > Overview |
+
+**CRITICAL: `GMAIL_CREDENTIALS_JSON` format**
+
+This is the most common source of Gmail auth failures. It must be a **raw token object** from a completed OAuth browser flow, NOT the Google Cloud Console download:
+
+```
+CORRECT:   {"access_token":"ya29.xxx","refresh_token":"1//xxx","scope":"...","token_type":"Bearer","expiry_date":1770428316567}
+WRONG:     {"installed":{"client_id":"xxx","client_secret":"xxx",...}}    <-- this is the KEYS file
+WRONG:     {"type":"authorized_user","client_id":"xxx","refresh_token":"xxx"}  <-- old format
+```
+
+The `refresh_token` field is essential. Without it, the Gmail MCP server cannot authenticate in the headless Docker container. The `access_token` expires in ~1 hour but the server auto-refreshes it using the `refresh_token`.
 
 ### OAuth Setup
 
 #### Gmail Setup
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/) → Create new project
-2. Enable the **Gmail API** under APIs & Services
-3. Go to **Credentials** → Create **OAuth 2.0 Client ID** (type: Desktop application)
-4. Download the JSON file → save as `gcp-oauth.keys.json` in `backend/`
-5. Run the setup script locally:
-   ```bash
-   cd backend
-   node setup-gmail-token.js
-   ```
-6. A browser opens for Google OAuth consent — grant access to Gmail
-7. The script outputs two JSON values
-8. Set in Railway environment variables:
-   - `GMAIL_OAUTH_KEYS_JSON` = contents of your `gcp-oauth.keys.json`
-   - `GMAIL_CREDENTIALS_JSON` = the token JSON output from the script
+**Step 1: Create Google Cloud OAuth credentials**
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/) > Create new project (or select existing)
+2. Enable the **Gmail API** under APIs & Services > Library
+3. Configure the **OAuth consent screen** (External type, add your Gmail as a test user)
+4. Go to **Credentials** > Create **OAuth 2.0 Client ID** (type: **Desktop application**)
+5. Download the JSON file > save as `gcp-oauth.keys.json` in `backend/`
+6. Set `GMAIL_OAUTH_KEYS_JSON` in Railway to the contents of this file
+
+**Step 2: Generate OAuth tokens (requires browser)**
+
+Two scripts are available:
+
+**Option A: Manual flow** (recommended, works in WSL):
+```bash
+cd backend
+node setup-gmail-manual.js
+# 1. Opens prints a URL — open it in your browser
+# 2. Grant Gmail access on Google's consent screen
+# 3. Browser redirects to localhost (page may not load — that's OK)
+# 4. Copy the FULL URL from browser address bar
+# 5. Extract the code= parameter value
+# 6. Run: node setup-gmail-manual.js "PASTE_CODE_HERE"
+# 7. Script outputs the token JSON
+```
+
+**Option B: Auto-redirect flow** (needs localhost accessible from browser):
+```bash
+cd backend
+node setup-gmail-token.js
+# Opens browser automatically, captures callback on localhost:3456
+```
+
+**Step 3: Set the token in Railway**
+
+Copy the token JSON output from the script and set it as `GMAIL_CREDENTIALS_JSON` in Railway.
+
+**Important notes:**
+- The OAuth consent screen must be in "Testing" mode with your Gmail added as a test user, OR published for production
+- In Testing mode, refresh tokens expire after **7 days** — you'll need to re-run the setup script
+- To avoid the 7-day limit, publish the OAuth consent screen (requires Google verification for public apps, but "Internal" type for Google Workspace has no limit)
+- The `refresh_token` is only returned on the FIRST authorization, or when `prompt=consent` is used (our scripts use this)
 
 #### Microsoft 365 Setup (Outlook + OneDrive)
 
-1. Go to [Azure Portal](https://portal.azure.com/) → **App Registrations** → **New registration**
+1. Go to [Azure Portal](https://portal.azure.com/) > **App Registrations** > **New registration**
 2. Note the **Application (client) ID** and **Directory (tenant) ID**
-3. Go to **Certificates & secrets** → create a new **Client secret**
-4. Go to **API permissions** → Add permissions:
+3. Go to **Certificates & secrets** > create a new **Client secret**
+4. Go to **API permissions** > Add permissions:
    - `Mail.Read`, `Mail.Send` (for Outlook email)
    - `Files.Read`, `Files.ReadWrite` (for OneDrive)
    - `User.Read` (basic profile)
@@ -294,6 +362,14 @@ Remote servers are free and require no API keys. Local servers (Gmail, MS365) ru
    - `MS365_MCP_CLIENT_ID` = Application (client) ID
    - `MS365_MCP_CLIENT_SECRET` = Client secret value
    - `MS365_MCP_TENANT_ID` = `common` (for personal Microsoft accounts)
+
+**MS365 authentication flow:**
+- Uses **device code flow** (like signing into a TV) — no browser redirect needed
+- On first chat request that uses MS365 tools, the AI will display a URL (`https://microsoft.com/devicelogin`) and a code
+- User visits the URL on any device, enters the code, and signs in with their Microsoft account
+- The `@softeria/ms-365-mcp-server` caches tokens in a file on the container filesystem
+- **Limitation**: Railway's filesystem is ephemeral — tokens are lost on every redeploy, requiring re-login
+- This is acceptable for now; see Troubleshooting issue #16 for workaround options
 
 ### Railway Deployment Steps
 
@@ -874,7 +950,15 @@ agents:
 
 **Solution**: Mobile app calls `tools/list` on connect and stores tool names in `availableTools` state. When sending messages, uses `availableTools[0] || 'chat'` instead of a hardcoded name. Works with any nanobot version.
 
-### 15. Gmail MCP Server Asks User to Log In Despite Credentials
+### 15. Railway Build Fails Instantly (0 seconds, no Docker output)
+
+**Error**: Railway build fails at "Build > Build image" in 0 seconds with only "Using Detected Dockerfile" in logs. No Docker build output at all.
+
+**Cause**: A `railway.json` file was present alongside `railway.toml` with conflicting settings. The JSON file had `startCommand: "nanobot run --ui"` (which overrides Docker ENTRYPOINT) and `healthcheckPath: "/health"` (which nanobot doesn't serve). Railway can get confused by having both config files.
+
+**Solution**: Delete `railway.json` and only use `railway.toml`. Never add `railway.json` to this project.
+
+### 16. Gmail MCP Server Asks User to Log In Despite Credentials
 
 **Error**: AI responds with "I need you to log in to your Google account" even though `GMAIL_OAUTH_KEYS_JSON` and `GMAIL_CREDENTIALS_JSON` are set in Railway.
 
@@ -897,7 +981,7 @@ GMAIL_CREDENTIALS_JSON = {"access_token":"ya29.xxx","refresh_token":"1//xxx","ex
 
 The entrypoint logs "refresh_token: present" or "WARNING: no refresh_token" to help diagnose this.
 
-### 16. MS365 Device Code Login Required After Every Deploy
+### 17. MS365 Device Code Login Required After Every Deploy
 
 **Error**: User must go to microsoft.com/devicelogin and enter a code every time Railway redeploys the container.
 
@@ -1076,6 +1160,13 @@ For the AI to proactively use device sensors (camera, GPS), several architectura
 - ~~Microsoft 365 Integration~~: `@softeria/ms-365-mcp-server` as stdio MCP server — Outlook email + OneDrive files
 - ~~Document Attachment Fix~~: File attachments now read as base64 via `expo-file-system` and sent to backend
 - ~~Debug Logging Cleanup~~: Removed console.log and debug fallback messages from chat response handler
+- ~~Nanobot v0.0.55 Upgrade~~: Multi-tool support (chat-with-*), --config flag, built-in agents (executor, explorer, planner)
+- ~~Bufio Scanner Patch~~: sed patch in Dockerfile increases LLM SSE reader buffer from 64KB to 10MB
+- ~~Dynamic Tool Discovery~~: Mobile app uses `tools/list` and `availableTools[0]` instead of hardcoded tool names
+- ~~Dynamic Config Generation~~: entrypoint.sh only includes MCP servers whose OAuth credentials are present
+- ~~Gmail OAuth Setup Scripts~~: `setup-gmail-token.js` (auto-redirect) and `setup-gmail-manual.js` (manual code paste)
+- ~~Entrypoint Hardening~~: printf instead of echo for JSON, HOME=/root export, refresh_token validation logging
+- ~~Railway Config Cleanup~~: Removed conflicting railway.json, only railway.toml remains
 
 ---
 
