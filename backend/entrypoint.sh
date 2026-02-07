@@ -7,8 +7,8 @@ export HOME=/root
 
 # Gmail: write OAuth keys and credentials to ~/.gmail-mcp/
 # The Gmail MCP server (@gongrzhe/server-gmail-autoauth-mcp) reads:
-#   ~/.gmail-mcp/gcp-oauth.keys.json  — OAuth client keys from Google Cloud Console
-#   ~/.gmail-mcp/credentials.json     — Token object with refresh_token (from setup-gmail-token.js)
+#   ~/.gmail-mcp/gcp-oauth.keys.json  - OAuth client keys from Google Cloud Console
+#   ~/.gmail-mcp/credentials.json     - Token object with refresh_token (from setup-gmail-token.js)
 GMAIL_READY=false
 if [ -n "$GMAIL_OAUTH_KEYS_JSON" ] && [ -n "$GMAIL_CREDENTIALS_JSON" ]; then
   mkdir -p /root/.gmail-mcp
@@ -23,13 +23,13 @@ if [ -n "$GMAIL_OAUTH_KEYS_JSON" ] && [ -n "$GMAIL_CREDENTIALS_JSON" ]; then
   if printf '%s' "$GMAIL_CREDENTIALS_JSON" | grep -q '"refresh_token"'; then
     echo "  refresh_token: present"
   else
-    echo "  WARNING: credentials.json has no refresh_token — Gmail auth will fail!"
+    echo "  WARNING: credentials.json has no refresh_token - Gmail auth will fail!"
     echo "  Run 'node setup-gmail-token.js' locally to generate proper credentials."
   fi
 fi
 
 # MS365 env vars are read directly by the ms-365-mcp-server
-# Note: MS365 uses device code flow — user must log in at microsoft.com/devicelogin
+# Note: MS365 uses device code flow - user must log in at microsoft.com/devicelogin
 # on first use (and after each container restart, since Railway filesystems are ephemeral)
 MS365_READY=false
 if [ -n "$MS365_MCP_CLIENT_ID" ] && [ -n "$MS365_MCP_CLIENT_SECRET" ]; then
