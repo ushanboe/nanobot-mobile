@@ -29,6 +29,7 @@ COPY --from=builder /app/nanobot .
 COPY nanobot.yaml .
 COPY entrypoint.sh .
 COPY ms365-wrapper.sh .
+COPY ms365-wrapper.mjs .
 RUN chmod +x entrypoint.sh ms365-wrapper.sh
 
 # Pre-install MCP server packages globally

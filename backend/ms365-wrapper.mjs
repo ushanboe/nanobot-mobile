@@ -159,6 +159,27 @@ if (fs.existsSync(cachePath) && config.clientId) {
   log(`Skipping token pre-acquisition (cacheFile: ${fs.existsSync(cachePath)}, clientId: ${!!config.clientId})`);
 }
 
+// Patch AuthManager.prototype.getToken BEFORE importing the server.
+// The server's auth.js caches the OAuth token as a plain string in its constructor:
+//   this.oauthToken = process.env.MS365_MCP_OAUTH_TOKEN
+// This means the 45-minute setInterval refresh (which updates process.env) has
+// no effect — getToken() keeps returning the stale constructor-time value.
+// By patching the prototype first, every getToken() call re-reads from process.env.
+const authModule = await import(pathToFileURL(path.join(pkgRoot, 'dist', 'auth.js')).href);
+const AuthManager = authModule.default;
+const originalGetToken = AuthManager.prototype.getToken;
+AuthManager.prototype.getToken = async function (forceRefresh) {
+  if (this.isOAuthMode) {
+    const freshToken = process.env.MS365_MCP_OAUTH_TOKEN;
+    if (freshToken) {
+      this.oauthToken = freshToken;
+      return freshToken;
+    }
+  }
+  return originalGetToken.call(this, forceRefresh);
+};
+log('Patched AuthManager.prototype.getToken to re-read from process.env');
+
 // Import and run the actual server
 log(`Starting server... (MS365_MCP_OAUTH_TOKEN set: ${!!process.env.MS365_MCP_OAUTH_TOKEN})`);
 await import(pathToFileURL(serverEntry).href);
