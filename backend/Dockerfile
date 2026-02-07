@@ -19,7 +19,7 @@ RUN go build -o nanobot .
 # Production image
 FROM alpine:latest
 
-RUN apk add --no-cache ca-certificates nodejs npm
+RUN apk add --no-cache ca-certificates nodejs npm curl
 
 WORKDIR /app
 
