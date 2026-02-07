@@ -304,16 +304,15 @@ const graphModule = await import(pathToFileURL(path.join(pkgRoot, 'dist', 'graph
 const GraphClient = graphModule.default;
 const originalMakeRequest = GraphClient.prototype.makeRequest;
 GraphClient.prototype.makeRequest = async function (endpoint, options = {}) {
-  // Strip $count from /me/drives requests — GPT-4o passes count:true but
-  // Microsoft's /me/drives endpoint doesn't support $count, returning 400.
-  // Note: graph-tools.js URL-encodes query params, so $count becomes %24count.
+  // Strip ALL query params from /me/drives requests — GPT-4o adds various OData
+  // params ($count, $skip, $top, etc.) but Microsoft's /me/drives endpoint doesn't
+  // support any of them, returning 400. This endpoint just lists drives, no params needed.
+  // Only strip from exact /me/drives, not sub-paths like /me/drives/{id}/items/...
   let cleanEndpoint = endpoint;
-  if (endpoint.startsWith('/me/drives')) {
-    cleanEndpoint = endpoint
-      .replace(/[?&](?:\$|%24)count=[^&]*/g, '')
-      .replace(/\?$/, '');
+  if (endpoint === '/me/drives' || endpoint.startsWith('/me/drives?')) {
+    cleanEndpoint = '/me/drives';
     if (cleanEndpoint !== endpoint) {
-      log(`Stripped unsupported params from /me/drives: "${endpoint}" → "${cleanEndpoint}"`);
+      log(`Stripped all query params from /me/drives: "${endpoint}" → "${cleanEndpoint}"`);
     }
   }
   const result = await originalMakeRequest.call(this, cleanEndpoint, options);
