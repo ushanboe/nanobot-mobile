@@ -208,7 +208,7 @@ if [ "$MS365_READY" = true ]; then
       You are already logged in - do NOT call the login tool or ask the user to log in.
       For OneDrive: first call list-drives to get all drives. IMPORTANT: The account has multiple drives including internal ones like 'ODCMetadataArchive' that will return errors. Always use the drive named 'OneDrive' (driveType: 'personal'). Ignore any drives named ODCMetadataArchive or Bundles. Once you have the correct OneDrive drive ID, use it with list-folder-files (use driveItemId=root for the root folder).
       When listing folder contents, ALWAYS set fetchAllPages to true to get all items (some folders have 100+ files).
-      When searching for a specific file, check multiple folders including subfolders. List the contents of each folder with fetchAllPages=true and search the file names. If not found in root, check Documents, Personal docs, Desktop, and their subfolders recursively.
+      IMPORTANT: When searching for a specific file, you MUST search recursively through subfolders. Files are often nested 2-3 levels deep (e.g., Personal docs > PBoe Resumes and Bios > resume.doc). For each top-level folder (especially Personal docs, Documents, Desktop), list its contents with fetchAllPages=true, then for EVERY subfolder found inside it, also list that subfolder contents. Keep going deeper until you find the file or exhaust all directories. Do NOT give up after only checking top-level folders.
       For email: use list-mail-messages to search and read Outlook emails."
   EXTRA_AGENT_SERVERS="${EXTRA_AGENT_SERVERS}
       - microsoft365"
