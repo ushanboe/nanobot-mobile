@@ -1,10 +1,11 @@
 // Main chat screen with proper nanobot integration
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { View, Text, Image, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, Text, Image, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform, Linking } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as Speech from 'expo-speech';
 import * as FileSystem from 'expo-file-system';
+import Markdown from 'react-native-markdown-display';
 import { ChatInput } from '../../components/ChatInput';
 import { loadSettings, type Settings } from '../../utils/settings';
 
@@ -317,7 +318,12 @@ export default function ChatScreen() {
             {msg.imageUri && (
               <Image source={{ uri: msg.imageUri }} style={styles.messageImage} />
             )}
-            <Text style={styles.messageText}>{msg.text}</Text>
+            <Markdown
+              style={markdownStyles}
+              onLinkPress={(url) => { Linking.openURL(url); return false; }}
+            >
+              {msg.text}
+            </Markdown>
             {msg.role === 'assistant' && msg.text && (
               <TouchableOpacity
                 style={styles.speakButton}
@@ -483,5 +489,70 @@ const styles = StyleSheet.create({
   },
   inputWrapper: {
     paddingBottom: 25,
+  },
+});
+
+const markdownStyles = StyleSheet.create({
+  body: {
+    color: '#fff',
+    fontSize: 15,
+    lineHeight: 22,
+  },
+  link: {
+    color: '#93c5fd',
+    textDecorationLine: 'underline',
+  },
+  heading1: {
+    color: '#fff',
+    fontSize: 20,
+    fontWeight: 'bold' as const,
+    marginVertical: 6,
+  },
+  heading2: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: 'bold' as const,
+    marginVertical: 4,
+  },
+  heading3: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold' as const,
+    marginVertical: 4,
+  },
+  strong: {
+    fontWeight: 'bold' as const,
+    color: '#fff',
+  },
+  em: {
+    fontStyle: 'italic' as const,
+  },
+  bullet_list: {
+    marginVertical: 4,
+  },
+  ordered_list: {
+    marginVertical: 4,
+  },
+  list_item: {
+    marginVertical: 2,
+  },
+  code_inline: {
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    fontFamily: 'monospace',
+    color: '#e2e8f0',
+  },
+  code_block: {
+    backgroundColor: 'rgba(0,0,0,0.3)',
+    padding: 10,
+    borderRadius: 8,
+    fontFamily: 'monospace',
+    fontSize: 13,
+    color: '#e2e8f0',
+  },
+  paragraph: {
+    marginVertical: 4,
   },
 });
