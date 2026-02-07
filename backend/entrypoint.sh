@@ -120,13 +120,20 @@ if [ "$MS365_READY" = true ]; then
       When asked about files or documents in their cloud storage, use OneDrive tools to search and retrieve them."
   EXTRA_AGENT_SERVERS="${EXTRA_AGENT_SERVERS}
       - microsoft365"
-  # Use ms365-wrapper.mjs which writes token cache from env vars in the SAME process
-  # that resolves the package, then imports and runs the server. This guarantees the
-  # cache file is at the exact path the server's auth.js expects (via import.meta.url).
+  # Use ms365-wrapper.mjs which acquires a fresh token and injects MS365_MCP_OAUTH_TOKEN.
+  # CRITICAL: nanobot does NOT pass parent env vars to child MCP servers.
+  # All required env vars must be passed explicitly via the env: field.
+  # Token cache is read from file (already written above) — not passed as env var
+  # (would cause YAML escaping issues with large JSON).
   EXTRA_MCP_SERVERS="${EXTRA_MCP_SERVERS}
   microsoft365:
     command: node
-    args: [\"/app/ms365-wrapper.mjs\"]"
+    args: [\"/app/ms365-wrapper.mjs\"]
+    env:
+      NODE_PATH: \"$(npm root -g)\"
+      MS365_PKG_ROOT: \"$MS365_PKG_ROOT\"
+      MS365_MCP_CLIENT_ID: \"$MS365_MCP_CLIENT_ID\"
+      MS365_MCP_TENANT_ID: \"${MS365_MCP_TENANT_ID:-common}\""
 fi
 
 if [ "$GMAIL_READY" = true ] && [ "$MS365_READY" = true ]; then
