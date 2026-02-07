@@ -208,6 +208,72 @@ AuthManager.prototype.getToken = async function (forceRefresh) {
 };
 log('Patched AuthManager.prototype.getToken to re-read from process.env');
 
+// Patch getCurrentAccount to return a synthetic account in OAuth mode.
+// Without this, tools like list-accounts and verify-login query the MSAL cache,
+// which is empty when using the direct MS365_REFRESH_TOKEN path. This causes
+// the AI to report "no Microsoft accounts currently linked" even though the
+// OAuth token works perfectly for Graph API calls.
+const originalGetCurrentAccount = AuthManager.prototype.getCurrentAccount;
+AuthManager.prototype.getCurrentAccount = async function () {
+  if (this.isOAuthMode && process.env.MS365_MCP_OAUTH_TOKEN) {
+    try {
+      // Decode JWT payload to extract user identity
+      const parts = process.env.MS365_MCP_OAUTH_TOKEN.split('.');
+      if (parts.length === 3) {
+        const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+        const payload = JSON.parse(Buffer.from(b64, 'base64').toString('utf8'));
+        return {
+          homeAccountId: payload.oid || payload.sub || 'oauth-user',
+          localAccountId: payload.oid || payload.sub || 'oauth-user',
+          environment: 'login.microsoftonline.com',
+          tenantId: payload.tid || config.tenantId || '',
+          username: payload.preferred_username || payload.upn || payload.email || '',
+          name: payload.name || '',
+        };
+      }
+    } catch (e) {
+      log(`JWT decode failed: ${e.message}`);
+    }
+    // Fallback: return minimal synthetic account
+    return {
+      homeAccountId: 'oauth-user',
+      localAccountId: 'oauth-user',
+      environment: 'login.microsoftonline.com',
+      tenantId: config.tenantId || '',
+      username: 'oauth-user',
+      name: 'OAuth User',
+    };
+  }
+  return originalGetCurrentAccount.call(this);
+};
+log('Patched AuthManager.prototype.getCurrentAccount for OAuth mode');
+
+// Patch listAccounts so list-accounts tool returns the synthetic account
+if (typeof AuthManager.prototype.listAccounts === 'function') {
+  const originalListAccounts = AuthManager.prototype.listAccounts;
+  AuthManager.prototype.listAccounts = async function () {
+    const accounts = await originalListAccounts.call(this);
+    if (this.isOAuthMode && (!accounts || accounts.length === 0) && process.env.MS365_MCP_OAUTH_TOKEN) {
+      const syntheticAccount = await this.getCurrentAccount();
+      return syntheticAccount ? [syntheticAccount] : [];
+    }
+    return accounts;
+  };
+  log('Patched AuthManager.prototype.listAccounts for OAuth mode');
+}
+
+// Patch testLogin so verify-login tool reports success in OAuth mode
+if (typeof AuthManager.prototype.testLogin === 'function') {
+  const originalTestLogin = AuthManager.prototype.testLogin;
+  AuthManager.prototype.testLogin = async function () {
+    if (this.isOAuthMode && process.env.MS365_MCP_OAUTH_TOKEN) {
+      return true;
+    }
+    return originalTestLogin.call(this);
+  };
+  log('Patched AuthManager.prototype.testLogin for OAuth mode');
+}
+
 // Import and run the actual server
 log(`Starting server... (MS365_MCP_OAUTH_TOKEN set: ${!!process.env.MS365_MCP_OAUTH_TOKEN})`);
 await import(pathToFileURL(serverEntry).href);

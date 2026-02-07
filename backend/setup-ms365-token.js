@@ -67,14 +67,26 @@ async function main() {
     accountId: response.account.homeAccountId,
   });
 
+  // Extract the raw refresh token from the MSAL cache
+  const parsed = JSON.parse(cacheData);
+  const refreshTokens = parsed.RefreshToken || {};
+  let refreshToken = '';
+  for (const val of Object.values(refreshTokens)) {
+    if (val.secret) { refreshToken = val.secret; break; }
+  }
+
   console.log('Set these as Railway environment variables:\n');
 
-  console.log('--- MS365_TOKEN_CACHE_JSON ---');
-  console.log(cacheData);
+  console.log('--- MS365_REFRESH_TOKEN (recommended — just paste this short string) ---');
+  console.log(refreshToken);
   console.log('');
 
   console.log('--- MS365_SELECTED_ACCOUNT_JSON ---');
   console.log(selectedAccount);
+  console.log('');
+
+  console.log('--- MS365_TOKEN_CACHE_JSON (optional — full MSAL cache, may be too large for Railway) ---');
+  console.log(cacheData);
   console.log('');
 }
 

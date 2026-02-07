@@ -76,7 +76,9 @@ nanobot-mobile/
 │   ├── nanobot.yaml            # Nanobot configuration (agents + MCP servers)
 │   ├── setup-gmail-token.js    # Local helper: auto-redirect OAuth flow (needs localhost)
 │   ├── setup-gmail-manual.js   # Local helper: manual code-paste OAuth flow (WSL-friendly)
-│   ├── setup-ms365-token.js    # Local helper: MS365 device code login + token cache export
+│   ├── setup-ms365-token.js    # Local helper: MS365 device code login + token/refresh export
+│   ├── test-onedrive.js        # Diagnostic: tests Graph API chain (refresh→token→/me→/drive→files)
+│   ├── ms365-wrapper.mjs       # MCP server launcher: token refresh, AuthManager patch
 │   ├── .env.example            # Environment variable template
 │   └── railway.toml            # Railway deployment config (only config file - no railway.json)
 │
@@ -150,12 +152,15 @@ RUN sed -i '/for lines.Scan()/i\\tlines.Buffer(make([]byte, 0, 1024), 10*1024*10
 RUN go build -o nanobot .
 
 FROM alpine:latest
-RUN apk add --no-cache ca-certificates nodejs npm
+RUN apk add --no-cache ca-certificates nodejs npm curl
 WORKDIR /app
 COPY --from=builder /app/nanobot .
+# Copy config, entrypoint, and wrapper scripts
 COPY nanobot.yaml .
 COPY entrypoint.sh .
-RUN chmod +x entrypoint.sh
+COPY ms365-wrapper.sh .
+COPY ms365-wrapper.mjs .
+RUN chmod +x entrypoint.sh ms365-wrapper.sh
 RUN npm install -g @gongrzhe/server-gmail-autoauth-mcp @softeria/ms-365-mcp-server
 EXPOSE 8080
 ENTRYPOINT ["./entrypoint.sh"]
@@ -164,8 +169,9 @@ ENTRYPOINT ["./entrypoint.sh"]
 **Key details**:
 - Nanobot pinned to **v0.0.55** (see Version Notes below for why)
 - **Bufio patch**: 3 LLM SSE reader files have their `bufio.Scanner` buffer increased from 64KB to 10MB. Without this, long AI responses cause `bufio.Scanner: token too long` errors. The patch uses `sed` to insert `lines.Buffer()` before each `for lines.Scan()` loop.
-- Production image includes `nodejs npm` for running MCP server subprocesses
+- Production image includes `nodejs npm curl` for running MCP server subprocesses and token refresh
 - Gmail and MS365 MCP packages are pre-installed globally via `npm install -g`
+- `ms365-wrapper.mjs` and `ms365-wrapper.sh` are copied into the container for MS365 token lifecycle management
 - `entrypoint.sh` dynamically generates `nanobot.yaml` based on available credentials
 - `entrypoint.sh` writes Gmail OAuth credentials to `/root/.gmail-mcp/` using `printf` (not `echo`, to avoid JSON mangling)
 - `entrypoint.sh` exports `HOME=/root` explicitly for Gmail MCP server's `os.homedir()` resolution
@@ -241,14 +247,18 @@ mcpServers:
   - Validates that `refresh_token` is present in the credentials (logs warning if missing)
   - Includes gmail MCP server in generated config
 - Checks `MS365_MCP_CLIENT_ID` + `MS365_MCP_CLIENT_SECRET` — if both set:
-  - Includes microsoft365 MCP server in generated config
-  - **Pre-seeds MS365 token cache** from `MS365_TOKEN_CACHE_JSON` env var (avoids device code login on every deploy):
+  - Includes microsoft365 MCP server in generated config (uses `ms365-wrapper.mjs` as launcher)
+  - **Pre-seeds MS365 token cache** from `MS365_TOKEN_CACHE_JSON` env var (if set):
     - Finds the `@softeria/ms-365-mcp-server` package root via `npm root -g`
-    - Writes token cache to `<package-root>/.token-cache.json`
+    - Writes token cache to `<package-root>/.token-cache.json` AND `/app/.ms365-token-cache.json` (fallback)
     - Validates the JSON is parseable
+  - **Falls back to `MS365_REFRESH_TOKEN`** env var (recommended — simpler ~400 char string that Railway reliably stores):
+    - Writes to `/app/.ms365-refresh-token` for `ms365-wrapper.mjs` to read
+  - **Pre-acquires access token** via curl refresh token exchange at startup
   - **Pre-seeds selected account** from `MS365_SELECTED_ACCOUNT_JSON` env var:
     - Transforms format if needed: server expects `{"accountId":"..."}` not `{"homeAccountId":"..."}`
     - Writes to `<package-root>/.selected-account.json`
+  - **Writes wrapper config** to `/app/ms365-config.json` (pkgRoot, clientId, tenantId, nodePath) — needed because nanobot doesn't pass env vars to child processes
   - Logs diagnostic info: npm root path, package dir existence, file sizes, JSON validity
 - **Email service routing**: When both Gmail and MS365 are configured, the AI is explicitly instructed to ONLY use Gmail tools for Gmail requests and ONLY use MS365 tools for Outlook/Microsoft requests — never falling back from one to the other
 - Generates `nanobot.yaml` with only the available servers, preventing "failed to build tool mappings" crashes
@@ -299,8 +309,9 @@ Remote servers are free and require no API keys. Local servers (Gmail, MS365) ru
 | `GMAIL_CREDENTIALS_JSON` | Gmail OAuth **tokens** (must have `refresh_token`!) | Run `node setup-gmail-manual.js` locally (see below) |
 | `MS365_MCP_CLIENT_ID` | Azure app client ID | Azure Portal > App Registrations |
 | `MS365_MCP_CLIENT_SECRET` | Azure app client secret | Azure Portal > Certificates & secrets |
-| `MS365_MCP_TENANT_ID` | Azure tenant ID (use `common` for personal accounts) | Azure Portal > App Registrations > Overview |
-| `MS365_TOKEN_CACHE_JSON` | MSAL token cache (avoids device code on redeploy) | Run `node setup-ms365-token.js` locally (see below) |
+| `MS365_MCP_TENANT_ID` | Azure tenant (use `consumers` for personal OneDrive, `common` for any) | Azure Portal > App Registrations > Overview |
+| `MS365_REFRESH_TOKEN` | **Recommended**: Raw refresh token (~400 chars, simple to paste) | Run `node setup-ms365-token.js` locally (see below) |
+| `MS365_TOKEN_CACHE_JSON` | Full MSAL token cache (alternative — may be too large for Railway) | Run `node setup-ms365-token.js` locally (see below) |
 | `MS365_SELECTED_ACCOUNT_JSON` | Selected account for auto-login | Run `node setup-ms365-token.js` locally (see below) |
 
 **CRITICAL: `GMAIL_CREDENTIALS_JSON` format**
@@ -401,29 +412,40 @@ The `@softeria/ms-365-mcp-server` uses **device code flow** which requires speci
 8. Set in Railway:
    - `MS365_MCP_CLIENT_ID` = Application (client) ID
    - `MS365_MCP_CLIENT_SECRET` = Client secret value
-   - `MS365_MCP_TENANT_ID` = `common` (use `common` for personal Microsoft accounts like @gmail.com, @outlook.com)
+   - `MS365_MCP_TENANT_ID` = `consumers` (recommended for personal Microsoft accounts accessing OneDrive). Use `common` if you need to support both personal and organizational accounts, but note this may resolve to unexpected linked identities.
 
-**Step 6: Generate token cache (avoids device code login on every deploy)**
+**Step 6: Generate refresh token (avoids device code login on every deploy)**
 
-Without this step, users must complete device code login every time Railway redeploys (ephemeral filesystem). The setup script performs a one-time device code login and exports the MSAL token cache:
+Without this step, users must complete device code login every time Railway redeploys (ephemeral filesystem). The setup script performs a one-time device code login and exports a refresh token:
 
 ```bash
 cd backend
 npm install @azure/msal-node  # One-time dependency
-MS365_MCP_CLIENT_ID=your-client-id node setup-ms365-token.js
+MS365_MCP_CLIENT_ID=your-client-id MS365_MCP_TENANT_ID=consumers node setup-ms365-token.js
 # 1. Script displays a URL and code
-# 2. Open https://microsoft.com/devicelogin in browser
+# 2. Open https://microsoft.com/devicelogin in InPrivate/Incognito browser
 # 3. Enter the code and sign in with your Microsoft account
-# 4. Script outputs MS365_TOKEN_CACHE_JSON and MS365_SELECTED_ACCOUNT_JSON
-# 5. Set both as Railway environment variables
+# 4. Script outputs MS365_REFRESH_TOKEN, MS365_SELECTED_ACCOUNT_JSON, and MS365_TOKEN_CACHE_JSON
+# 5. Set MS365_REFRESH_TOKEN (recommended) and MS365_SELECTED_ACCOUNT_JSON in Railway
+```
+
+**Step 7: Verify with test-onedrive.js (optional but recommended)**
+
+Before deploying, verify the token works end-to-end:
+
+```bash
+MS365_MCP_CLIENT_ID=your-client-id MS365_REFRESH_TOKEN=your-token MS365_MCP_TENANT_ID=consumers node test-onedrive.js
+# Shows: refresh → access token → /me (profile) → /me/drive (OneDrive) → files list
 ```
 
 **Important notes:**
-- Use **InPrivate/Incognito** browser window for device code login to avoid cached account issues
-- If you get `AADSTS50020` (wrong account type), ensure `MS365_MCP_TENANT_ID=common` and app supports personal accounts
+- **CRITICAL: Tenant must match** — the tenant used in `setup-ms365-token.js` MUST match `MS365_MCP_TENANT_ID` in Railway. Mismatches cause `AADSTS7000012` errors.
+- Use **InPrivate/Incognito** browser window for device code login to avoid Microsoft's account linking resolving to unexpected identities
+- **MS365_REFRESH_TOKEN** (recommended) is a simple ~400 char string. `MS365_TOKEN_CACHE_JSON` is a large JSON blob that Railway sometimes truncates to 0 chars.
+- If you get `AADSTS50020` (wrong account type), check your tenant setting and ensure the Azure app supports the account type
 - Device codes expire in ~15 minutes — complete login promptly
 - Refresh tokens last ~90 days. After expiry, re-run `setup-ms365-token.js`
-- The token cache JSON contains `!`, `*`, `$` characters — ensure Railway doesn't shell-expand them (paste via the UI, not CLI)
+- Microsoft account linking can cause confusion: `user@company.com` may resolve to `user@outlook.com` if the accounts are linked. The `/me` endpoint in test-onedrive.js shows which identity was actually resolved.
 
 **MS365 MCP server internals** (`@softeria/ms-365-mcp-server`):
 - Always uses `PublicClientApplication` from MSAL (regardless of whether client secret is set)
@@ -432,6 +454,16 @@ MS365_MCP_CLIENT_ID=your-client-id node setup-ms365-token.js
 - Selected account format: `{"accountId": "homeAccountId-value"}` — NOT `{"homeAccountId": "..."}`
 - `getToken()` calls `acquireTokenSilent()` which uses the refresh token to get new access tokens
 - If token cache is empty (no accounts), throws "No valid token found" — this means pre-seeding failed
+- **Known bug**: Server caches `MS365_MCP_OAUTH_TOKEN` env var once in the constructor. Token refreshes that update `process.env` have no effect. Our `ms365-wrapper.mjs` patches `AuthManager.prototype.getToken` to re-read from `process.env` on every call.
+
+**ms365-wrapper.mjs** (token lifecycle manager):
+- Reads config from `/app/ms365-config.json` (written by `entrypoint.sh`) since nanobot doesn't pass env vars to child processes
+- Gets refresh token from MSAL cache file OR `/app/.ms365-refresh-token` (from `MS365_REFRESH_TOKEN` env var)
+- Calls Microsoft token endpoint directly to exchange refresh token for access token
+- Sets `process.env.MS365_MCP_OAUTH_TOKEN` before importing the server
+- Patches `AuthManager.prototype.getToken` to re-read from `process.env` (fixes stale token bug)
+- Refreshes token every 45 minutes via `setInterval`
+- Imports `auth.js` before `index.js` (ESM singleton ensures patched prototype is used by server)
 
 ### Railway Deployment Steps
 
@@ -1049,19 +1081,28 @@ The entrypoint logs "refresh_token: present" or "WARNING: no refresh_token" to h
 
 **Cause**: The `@softeria/ms-365-mcp-server` caches OAuth tokens in a file on disk. Railway's filesystem is **ephemeral** — all files are lost on container restart/redeploy. The token cache is destroyed, requiring re-authentication.
 
-**Solution (implemented)**: Token cache pre-seeding via environment variables:
+**Solution (implemented)**: Token pre-seeding via environment variables + `ms365-wrapper.mjs`:
 1. Run `node setup-ms365-token.js` locally to complete device code login once
-2. Set `MS365_TOKEN_CACHE_JSON` and `MS365_SELECTED_ACCOUNT_JSON` in Railway env vars
-3. `entrypoint.sh` writes these to the correct filesystem paths on container startup
-4. The ms-365-mcp-server reads the pre-seeded cache and uses the refresh token for silent auth
+2. Set `MS365_REFRESH_TOKEN` (recommended — simple ~400 char string) in Railway env vars
+3. Optionally set `MS365_SELECTED_ACCOUNT_JSON` for account auto-selection
+4. `entrypoint.sh` writes tokens to filesystem paths on container startup
+5. `ms365-wrapper.mjs` reads the token, exchanges for access token, and patches the server's AuthManager
+
+**Two paths for token delivery** (entrypoint tries both):
+- **Path A (recommended)**: `MS365_REFRESH_TOKEN` env var → `/app/.ms365-refresh-token` → wrapper reads directly
+- **Path B**: `MS365_TOKEN_CACHE_JSON` env var → `<package-root>/.token-cache.json` → wrapper extracts refresh token from MSAL cache
 
 **Key paths** (determined by `npm root -g`):
 - Token cache: `<npm-global-root>/@softeria/ms-365-mcp-server/.token-cache.json`
 - Selected account: `<npm-global-root>/@softeria/ms-365-mcp-server/.selected-account.json`
+- Direct refresh token: `/app/.ms365-refresh-token`
+- Wrapper config: `/app/ms365-config.json`
 
 **If still failing ("No valid token found")**:
-- Check Railway deploy logs for diagnostic output (npm root path, package dir existence, JSON validity)
-- Verify the token cache JSON is valid: should contain Account, IdToken, AccessToken, RefreshToken sections
+- Check Railway deploy logs for diagnostic output (npm root path, package dir existence, token source)
+- Look for `MS365_TOKEN_CACHE_JSON env var: 0 chars` — if so, use `MS365_REFRESH_TOKEN` instead
+- Look for `Using MS365_REFRESH_TOKEN env var directly (XXX chars)` — confirms token delivery
+- Look for `ACCESS TOKEN ACQUIRED (XXX chars)` — confirms token exchange worked
 - Verify selected account format is `{"accountId":"..."}` not `{"homeAccountId":"..."}`
 - Refresh tokens expire after ~90 days — re-run `setup-ms365-token.js` if expired
 
@@ -1081,11 +1122,11 @@ The entrypoint logs "refresh_token: present" or "WARNING: no refresh_token" to h
 
 **Error**: `AADSTS50020: User account from identity provider 'live.com' does not exist in tenant`
 
-**Cause**: Trying to log in with a personal Microsoft account (e.g., @gmail.com, @outlook.com) but the tenant ID is set to a specific organization tenant instead of `common`.
+**Cause**: Trying to log in with a personal Microsoft account (e.g., @gmail.com, @outlook.com) but the tenant ID is set to a specific organization tenant instead of `common` or `consumers`.
 
 **Solution**:
-- Set `MS365_MCP_TENANT_ID=common` in Railway env vars
-- In `setup-ms365-token.js`, ensure tenant is `common`
+- Set `MS365_MCP_TENANT_ID=consumers` (for personal accounts with OneDrive) or `common` (for any account type)
+- In `setup-ms365-token.js`, use the same tenant as Railway: `MS365_MCP_TENANT_ID=consumers`
 - Use InPrivate/Incognito browser to avoid cached organizational account sessions
 
 ### 20. AI Returns Wrong Dates for "Yesterday" Email Queries
@@ -1105,6 +1146,47 @@ The entrypoint logs "refresh_token: present" or "WARNING: no refresh_token" to h
 **Solution (implemented)**: Explicit routing instructions in `entrypoint.sh`:
 - When both services are configured: "When the user mentions 'Gmail', ONLY use Gmail tools. When the user mentions 'Outlook' or 'Microsoft', ONLY use Microsoft 365 tools. Never fall back to one email service when the other fails."
 - When only one service is configured: Instructions direct the AI to only use that service and report auth errors instead of trying alternatives.
+
+### 22. MS365_TOKEN_CACHE_JSON Truncated to 0 Chars in Railway
+
+**Error**: Deploy logs show `MS365_TOKEN_CACHE_JSON env var: 0 chars` even though the value was set in Railway dashboard.
+
+**Cause**: The full MSAL token cache JSON is a large complex blob (2000+ chars) containing special characters (`!`, `*`, `$`, etc.). Railway sometimes fails to persist or pass it correctly.
+
+**Solution (implemented)**: Added `MS365_REFRESH_TOKEN` as a simpler alternative env var:
+- Just the raw refresh token string (~400 chars, no special characters)
+- `entrypoint.sh` falls back to `MS365_REFRESH_TOKEN` when `MS365_TOKEN_CACHE_JSON` is empty
+- `setup-ms365-token.js` outputs this as the first recommended option
+
+### 23. Azure AD Error: AADSTS7000012 Tenant Mismatch
+
+**Error**: `AADSTS7000012: The grant was obtained for a different tenant` when the app tries to refresh the access token.
+
+**Cause**: Refresh tokens are bound to the tenant they were issued from. A token obtained with `MS365_MCP_TENANT_ID=common` will fail when used with `MS365_MCP_TENANT_ID=consumers` (or vice versa).
+
+**Solution**: Re-run `setup-ms365-token.js` with the SAME tenant that Railway is configured with:
+```bash
+MS365_MCP_CLIENT_ID=your-id MS365_MCP_TENANT_ID=consumers node setup-ms365-token.js
+```
+Then update `MS365_REFRESH_TOKEN` in Railway with the new token.
+
+**Verify with test-onedrive.js**:
+```bash
+MS365_MCP_CLIENT_ID=your-id MS365_REFRESH_TOKEN=new-token MS365_MCP_TENANT_ID=consumers node test-onedrive.js
+```
+
+### 24. MS365 Authenticates as Wrong Microsoft Account (Account Linking)
+
+**Error**: AI returns emails or OneDrive files from `user@outlook.com` instead of the expected `user@company.com` that was selected during device code login.
+
+**Cause**: Microsoft's identity system links personal accounts across identities. When using `common` tenant, selecting `user@company.com` at the login page may resolve to the underlying `user@outlook.com` personal account if they're linked. The Graph API returns data for the resolved identity.
+
+**Solution**:
+- Use `consumers` tenant to force personal account resolution (avoids organizational identity confusion)
+- Use a specific organization tenant GUID if you need work/school account data
+- Use **InPrivate/Incognito** browser for device code login to avoid cached session interference
+- Run `test-onedrive.js` to verify which identity the Graph API resolves to (shows `/me` profile)
+- If accounts are hopelessly tangled, consider using a fresh Microsoft account
 
 ---
 
@@ -1283,6 +1365,9 @@ For the AI to proactively use device sensors (camera, GPS), several architectura
 - ~~Email Service Routing~~: Explicit instructions prevent AI from falling back between Gmail and MS365
 - ~~MS365 Token Persistence~~: Token cache pre-seeded from Railway env vars via entrypoint.sh — avoids device code login on redeploy
 - ~~MS365 Setup Script~~: `setup-ms365-token.js` performs device code login and exports token cache + selected account JSON
+- ~~MS365 Wrapper~~: `ms365-wrapper.mjs` manages token lifecycle — pre-acquires access token, patches AuthManager.getToken, refreshes every 45 min
+- ~~MS365 Refresh Token Fallback~~: `MS365_REFRESH_TOKEN` env var as simpler alternative to `MS365_TOKEN_CACHE_JSON` (Railway was truncating the large JSON to 0 chars)
+- ~~MS365 Diagnostic Script~~: `test-onedrive.js` tests the full Graph API chain (refresh → access token → /me → /me/drive → files) without involving nanobot
 
 ---
 

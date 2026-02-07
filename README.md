@@ -85,8 +85,11 @@ cd android && ./gradlew assembleRelease
 
 - Chat with GPT-4o / Claude via your own API keys
 - **AI tools via MCP servers**: web search (Exa), URL fetching, step-by-step reasoning, GitHub project lookup (DeepWiki)
+- **Gmail integration**: Search, read, and send emails via Gmail MCP server
+- **Microsoft 365 integration**: Outlook email + OneDrive files via MS365 MCP server
 - **Multimodal image support**: Send photos to GPT-4o for visual analysis (camera or gallery)
 - **Text-to-Speech**: Tap the speaker icon on any assistant message to hear it read aloud
+- **Speech-to-Text**: On-device voice input via mic button
 - **Attachments**: Camera photos, gallery images, and document/file picker
 - MCP protocol (JSON-RPC 2.0) communication
 - Dark theme UI with indigo accents
@@ -118,17 +121,24 @@ cd android && ./gradlew assembleRelease
 | File | Purpose |
 |------|---------|
 | `Dockerfile` | Multi-stage Go build for Railway |
-| `nanobot.yaml` | Agent config (GPT-4o + 4 MCP servers) |
+| `entrypoint.sh` | Startup script — writes OAuth creds, generates nanobot.yaml |
+| `nanobot.yaml` | Agent config (GPT-4o + up to 6 MCP servers) |
+| `ms365-wrapper.mjs` | MS365 MCP server launcher — token refresh, AuthManager patch |
+| `setup-ms365-token.js` | Local: MS365 device code login, exports refresh token |
+| `setup-gmail-manual.js` | Local: Gmail OAuth flow (WSL-friendly) |
+| `test-onedrive.js` | Diagnostic: tests Graph API chain directly |
 | `railway.toml` | Railway deployment config |
 
 ### MCP Servers (Backend Tools)
 
-| Server | URL | Purpose |
-|--------|-----|---------|
-| Exa Search | `mcp.exa.ai` | Web search for current information |
-| Fetch | `remote.mcpservers.org/fetch` | Read and summarize URLs |
-| Sequential Thinking | `remote.mcpservers.org/sequentialthinking` | Step-by-step reasoning |
-| DeepWiki | `mcp.deepwiki.com` | GitHub project documentation lookup |
+| Server | Type | Purpose |
+|--------|------|---------|
+| Exa Search | Remote | Web search for current information |
+| Fetch | Remote | Read and summarize URLs |
+| Sequential Thinking | Remote | Step-by-step reasoning |
+| DeepWiki | Remote | GitHub project documentation lookup |
+| Gmail | Local (stdio) | Gmail email — search, read, send |
+| Microsoft 365 | Local (stdio) | Outlook email + OneDrive files |
 
 ## Environment Variables
 
@@ -138,8 +148,14 @@ cd android && ./gradlew assembleRelease
 |----------|----------|-------------|
 | `OPENAI_API_KEY` | Yes* | OpenAI API key |
 | `ANTHROPIC_API_KEY` | Yes* | Anthropic API key |
+| `GMAIL_OAUTH_KEYS_JSON` | For Gmail | OAuth client keys from Google Cloud Console |
+| `GMAIL_CREDENTIALS_JSON` | For Gmail | OAuth tokens with `refresh_token` (from setup script) |
+| `MS365_MCP_CLIENT_ID` | For MS365 | Azure AD app client ID |
+| `MS365_MCP_CLIENT_SECRET` | For MS365 | Azure AD client secret |
+| `MS365_MCP_TENANT_ID` | For MS365 | `consumers` (personal OneDrive) or `common` (any) |
+| `MS365_REFRESH_TOKEN` | For MS365 | Refresh token (~400 chars, from setup script) |
 
-*At least one API key is required.
+*At least one API key is required. Gmail and MS365 variables are optional — the backend auto-detects available services.
 
 ## Theming
 
