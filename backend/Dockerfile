@@ -28,8 +28,8 @@ COPY --from=builder /app/nanobot .
 # Copy config, entrypoint, and wrapper scripts
 COPY nanobot.yaml .
 COPY entrypoint.sh .
-COPY ms365-wrapper.mjs .
-RUN chmod +x entrypoint.sh
+COPY ms365-wrapper.sh .
+RUN chmod +x entrypoint.sh ms365-wrapper.sh
 
 # Pre-install MCP server packages globally
 RUN npm install -g @gongrzhe/server-gmail-autoauth-mcp @softeria/ms-365-mcp-server

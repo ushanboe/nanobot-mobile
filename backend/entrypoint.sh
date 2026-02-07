@@ -134,13 +134,13 @@ if [ "$MS365_READY" = true ]; then
       When asked about files or documents in their cloud storage, use OneDrive tools to search and retrieve them."
   EXTRA_AGENT_SERVERS="${EXTRA_AGENT_SERVERS}
       - microsoft365"
-  # Use ms365-wrapper.mjs which reads /app/ms365-config.json and token cache file,
-  # acquires a fresh access token, and injects it via MS365_MCP_OAUTH_TOKEN.
-  # All config is file-based because nanobot doesn't pass env vars to child processes.
+  # Use ms365-wrapper.sh (shell script) which reads /app/ms365-config.json,
+  # acquires a fresh token via curl, exports MS365_MCP_OAUTH_TOKEN, then
+  # exec's the node server. Shell scripts pass env vars to exec'd processes.
+  # All config is file-based because nanobot doesn't pass env vars to children.
   EXTRA_MCP_SERVERS="${EXTRA_MCP_SERVERS}
   microsoft365:
-    command: node
-    args: [\"/app/ms365-wrapper.mjs\"]"
+    command: /app/ms365-wrapper.sh"
 fi
 
 if [ "$GMAIL_READY" = true ] && [ "$MS365_READY" = true ]; then
