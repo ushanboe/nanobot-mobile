@@ -1,6 +1,6 @@
 // Main chat screen with proper nanobot integration
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { View, Text, Image, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform, Linking } from 'react-native';
+import { View, Text, Image, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform, Linking, Alert } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as Speech from 'expo-speech';
@@ -8,6 +8,8 @@ import * as FileSystem from 'expo-file-system';
 import Markdown from 'react-native-markdown-display';
 import { ChatInput } from '../../components/ChatInput';
 import { loadSettings, type Settings } from '../../utils/settings';
+import * as SmsService from '../../services/smsService';
+import { isSmsRelated, parseResponseForActions } from '../../utils/smsHelpers';
 
 export default function ChatScreen() {
   const router = useRouter();
@@ -139,6 +141,21 @@ export default function ChatScreen() {
 
     const prompt = userMessage || 'What do you see in this image?';
 
+    // SMS context injection: if message seems SMS-related, read recent messages
+    // and prepend them to the prompt so the AI has phone SMS data
+    let augmentedPrompt = prompt;
+    if (isSmsRelated(prompt)) {
+      try {
+        const smsMessages = await SmsService.getMessages({ box: 'all' }, 30);
+        if (smsMessages.length > 0) {
+          const smsContext = SmsService.formatSmsForContext(smsMessages);
+          augmentedPrompt = `${prompt}\n\n${smsContext}`;
+        }
+      } catch (error) {
+        console.warn('Failed to read SMS for context:', error);
+      }
+    }
+
     // Build nanobot attachments array from image and file data
     let nanobotAttachments: Array<{ url: string; mimeType: string; name: string }> | undefined;
     if (hasAttachments) {
@@ -173,7 +190,7 @@ export default function ChatScreen() {
     }
 
     // Build tool arguments — include attachments if we have data
-    const toolArguments: Record<string, unknown> = { prompt };
+    const toolArguments: Record<string, unknown> = { prompt: augmentedPrompt };
     if (nanobotAttachments && nanobotAttachments.length > 0) {
       toolArguments.attachments = nanobotAttachments;
     }
@@ -215,7 +232,32 @@ export default function ChatScreen() {
         responseText = `Error: ${data.error.message}`;
       }
 
-      setMessages(prev => [...prev, { role: 'assistant', text: responseText }]);
+      // Parse response for SMS send action tags
+      const { displayText, smsAction } = parseResponseForActions(responseText);
+      setMessages(prev => [...prev, { role: 'assistant', text: displayText }]);
+
+      // If the AI wants to send an SMS, show confirmation dialog
+      if (smsAction) {
+        setTimeout(() => {
+          Alert.alert(
+            'Send SMS?',
+            `To: ${smsAction.to}\n\n"${smsAction.body}"`,
+            [
+              { text: 'Cancel', style: 'cancel' },
+              {
+                text: 'Send',
+                onPress: async () => {
+                  const result = await SmsService.sendMessage(smsAction.to, smsAction.body);
+                  const statusMsg = result.success
+                    ? `SMS sent to ${smsAction.to}`
+                    : `Failed to send SMS: ${result.message}`;
+                  setMessages(prev => [...prev, { role: 'assistant', text: statusMsg }]);
+                },
+              },
+            ]
+          );
+        }, 300);
+      }
     } catch (error) {
       setMessages(prev => [...prev, { role: 'assistant', text: `Error: ${error}` }]);
     }

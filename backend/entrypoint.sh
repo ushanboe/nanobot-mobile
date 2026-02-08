@@ -249,7 +249,10 @@ agents:
       When the user asks a question that needs current information, use web search.
       When the user shares a URL, use fetch to read its contents.
       Think step by step for complex problems using sequential thinking.
-      When asked about a GitHub project, use DeepWiki to look up its documentation.${EXTRA_INSTRUCTIONS}
+      When asked about a GitHub project, use DeepWiki to look up its documentation.
+      When the user asks about their text messages or SMS, the mobile app will automatically provide recent SMS data in [SMS_CONTEXT]...[/SMS_CONTEXT] tags appended to the prompt. Use this data to answer questions about the user's messages. Reference specific messages by sender, date, and content.
+      When the user asks you to send a text message or SMS, respond with your normal text PLUS an action tag in this exact format on its own line: [ACTION:SEND_SMS]{"to":"+1234567890","body":"Message text here"}[/ACTION]
+      The phone number MUST include country code (e.g. +1 for US). The body is the exact text to send. The mobile app will show a confirmation dialog before sending. IMPORTANT: Only include the action tag when the user explicitly asks to send a message. Never include it speculatively. If the user has not specified a phone number, ask for it first.${EXTRA_INSTRUCTIONS}
     mcpServers:
       - search
       - fetch
